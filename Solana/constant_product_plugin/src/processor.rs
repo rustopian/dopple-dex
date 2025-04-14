@@ -215,33 +215,46 @@ impl Processor {
             // Use spl-token-swap invariant-preserving logic with ceiling division
             let invariant = U192::from(reserve_in)
                 .checked_mul(U192::from(reserve_out))
-                .ok_or(ProgramError::InvalidInstructionData)?;
+                .ok_or_else(|| {
+                    msg!("Error: Invariant calculation overflowed U192");
+                    ProgramError::InvalidInstructionData
+                })?;
 
             let reserve_in_u128 = reserve_in as u128;
             let reserve_out_u128 = reserve_out as u128;
 
-            let new_reserve_in_u128 = reserve_in_u128
-                .checked_add(effective_in)
-                .ok_or(ProgramError::InvalidInstructionData)?;
+            let new_reserve_in_u128 =
+                reserve_in_u128.checked_add(effective_in).ok_or_else(|| {
+                    msg!("Error: New reserve_in overflowed u128");
+                    ProgramError::InvalidInstructionData
+                })?;
 
             // Need to downcast invariant safely before u128::checked_ceil_div
-            let invariant_u128: u128 = invariant
-                .try_into()
-                .map_err(|_| ProgramError::InvalidInstructionData)?;
+            let invariant_u128: u128 = invariant.try_into().map_err(|_| {
+                msg!("Error: Failed to downcast U192 invariant to u128");
+                ProgramError::InvalidInstructionData
+            })?;
 
             // Calculate minimum destination amount needed using ceiling division
             let (new_reserve_out_u128, _) = invariant_u128
                 .checked_ceil_div(new_reserve_in_u128)
-                .ok_or(ProgramError::InvalidInstructionData)?;
+                .ok_or_else(|| {
+                    msg!("Error: checked_ceil_div failed (division by zero or overflow?)");
+                    ProgramError::InvalidInstructionData
+                })?;
 
             // Calculate amount out based on the ceiling-derived new destination reserve
             let destination_amount_swapped_u128 = reserve_out_u128
                 .checked_sub(new_reserve_out_u128)
-                .ok_or(ProgramError::InvalidInstructionData)?;
+                .ok_or_else(|| {
+                    msg!("Error: checked_sub failed (amount_out negative?)");
+                    ProgramError::InvalidInstructionData
+                })?;
 
-            let amount_out: u64 = destination_amount_swapped_u128
-                .try_into()
-                .map_err(|_| ProgramError::InvalidInstructionData)?;
+            let amount_out: u64 = destination_amount_swapped_u128.try_into().map_err(|_| {
+                msg!("Error: Failed to downcast final amount_out (u128) to u64");
+                ProgramError::InvalidInstructionData
+            })?;
 
             result.amount_out = amount_out;
         }

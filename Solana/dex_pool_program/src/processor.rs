@@ -533,9 +533,10 @@ impl Processor {
             .try_to_vec()?;
         let ix = solana_program::instruction::Instruction {
             program_id: pool_data.plugin_program_id,
-            accounts: vec![
-                solana_program::instruction::AccountMeta::new(*plugin_state_acc.key, false),
-            ],
+            accounts: vec![solana_program::instruction::AccountMeta::new(
+                *plugin_state_acc.key,
+                false,
+            )],
             data: ix_data,
         };
         msg!("Pool: About to invoke plugin for RemoveLiquidity");
@@ -745,18 +746,13 @@ impl Processor {
         .try_to_vec()?;
         let ix = solana_program::instruction::Instruction {
             program_id: pool_data.plugin_program_id,
-            accounts: vec![
-                solana_program::instruction::AccountMeta::new(*plugin_state_acc.key, false),
-            ],
+            accounts: vec![solana_program::instruction::AccountMeta::new(
+                *plugin_state_acc.key,
+                false,
+            )],
             data: ix_data,
         };
-        invoke(
-            &ix,
-            &[
-                plugin_prog_acc.clone(),
-                plugin_state_acc.clone(),
-            ],
-        )?;
+        invoke(&ix, &[plugin_prog_acc.clone(), plugin_state_acc.clone()])?;
 
         let plugin_calc = PluginCalcResult::deserialize(&mut &plugin_state_acc.data.borrow()[..])?;
         let amount_out = plugin_calc.amount_out;

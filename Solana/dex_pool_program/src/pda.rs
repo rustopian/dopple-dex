@@ -208,9 +208,7 @@ pub fn validate_token_account_basic(
 
 /// Validates basic properties of an SPL Mint account.
 /// Checks: Token Program owner, Initialized.
-pub fn validate_mint_basic(
-    mint_info: &AccountInfo,
-) -> Result<Mint, ProgramError> {
+pub fn validate_mint_basic(mint_info: &AccountInfo) -> Result<Mint, ProgramError> {
     // Check ownership by Token Program
     if mint_info.owner != &TOKEN_PROGRAM_ID {
         msg!(
