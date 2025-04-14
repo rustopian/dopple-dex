@@ -1207,8 +1207,6 @@ fn test_wsol_pool_full_cycle() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// --- Add Missing Tests Back ---
-
 #[test]
 fn test_add_liquidity_simple() -> Result<(), Box<dyn Error>> {
     let mut setup = setup_test_environment()?;
