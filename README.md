@@ -4,6 +4,10 @@ This project implements the Dopple DEX, a decentralized exchange, on two differe
 
 Full LiteSVM and Multitest tests are included.
 
+## Security Matters
+
+Right now, `constant_product_plugin` can be called externally. It should verify that it can only be called by the `dex_pool_program`.
+
 - **Solana:** Contains the implementation for the Solana blockchain. See the [Solana README](./Solana/README.md) for details.
 - **CosmWasm:** Contains the implementation using the CosmWasm framework. See the [CosmWasm README](./CosmWasm/README.md) for details.
 
