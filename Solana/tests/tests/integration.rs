@@ -11,6 +11,7 @@ use {
     solana_sdk::{
         // account::Account, // Removed, covered by Pack
         instruction::{AccountMeta, Instruction},
+        message::Message,
         // Use Pack from the spl_token re-export
         // program_pack::Pack, // Old import
         pubkey::Pubkey,
@@ -19,12 +20,9 @@ use {
         system_program,
         sysvar::{self, rent::Rent}, // Removed unused Sysvar trait
         transaction::Transaction,
-        message::Message,
     },
-    spl_associated_token_account,
-    spl_memo,                                              // Added import for spl-memo
-    spl_token::{self, solana_program::program_pack::Pack}, // Use Pack from here for spl_token::state::Account
-    std::env,                                              // Keep for current_dir
+    spl_token::{self, solana_program::program_pack::Pack},
+    std::env,
     std::error::Error,
     std::mem::size_of,
 };
@@ -359,24 +357,31 @@ fn setup_test_environment() -> Result<TestSetup, Box<dyn Error>> {
     let init_ix = Instruction {
         program_id: dex_pid,
         accounts: vec![
-            AccountMeta::new(payer.pubkey(), true),             // 0 Payer (Signer)
-            AccountMeta::new(pool_pda, false),                  // 1 Pool State (Writable, NOT Signer)
-            AccountMeta::new(vault_a_pk, false),                // 2 Vault A (Writable, NOT Signer)
-            AccountMeta::new(vault_b_pk, false),                // 3 Vault B (Writable, NOT Signer)
-            AccountMeta::new(lp_mint, false),                   // 4 LP Mint (Writable, NOT Signer)
-            AccountMeta::new_readonly(mint_a, false),           // 5 Mint A (Readonly)
-            AccountMeta::new_readonly(mint_b, false),           // 6 Mint B (Readonly)
-            AccountMeta::new_readonly(plugin_pid, false),       // 7 Plugin Program (Readonly)
-            AccountMeta::new(plugin_state_pk, false),           // 8 Plugin State (Writable, NOT Signer)
+            AccountMeta::new(payer.pubkey(), true),   // 0 Payer (Signer)
+            AccountMeta::new(pool_pda, false),        // 1 Pool State (Writable, NOT Signer)
+            AccountMeta::new(vault_a_pk, false),      // 2 Vault A (Writable, NOT Signer)
+            AccountMeta::new(vault_b_pk, false),      // 3 Vault B (Writable, NOT Signer)
+            AccountMeta::new(lp_mint, false),         // 4 LP Mint (Writable, NOT Signer)
+            AccountMeta::new_readonly(mint_a, false), // 5 Mint A (Readonly)
+            AccountMeta::new_readonly(mint_b, false), // 6 Mint B (Readonly)
+            AccountMeta::new_readonly(plugin_pid, false), // 7 Plugin Program (Readonly)
+            AccountMeta::new(plugin_state_pk, false), // 8 Plugin State (Writable, NOT Signer)
             AccountMeta::new_readonly(system_program::id(), false), // 9 System Program (Readonly)
-            AccountMeta::new_readonly(sysvar::rent::id(), false),   // 10 Rent Sysvar (Readonly)
-            AccountMeta::new_readonly(spl_token::id(), false),      // 11 Token Program (Readonly)
+            AccountMeta::new_readonly(sysvar::rent::id(), false), // 10 Rent Sysvar (Readonly)
+            AccountMeta::new_readonly(spl_token::id(), false), // 11 Token Program (Readonly)
         ],
         data: PoolInstruction::InitializePool.try_to_vec()?,
     };
 
     // --- Diagnostic Logging for InitializePool TX ---
-    println!("InitializePool IX Accounts: {:?}", init_ix.accounts.iter().map(|am| (am.pubkey, am.is_signer, am.is_writable)).collect::<Vec<_>>());
+    println!(
+        "InitializePool IX Accounts: {:?}",
+        init_ix
+            .accounts
+            .iter()
+            .map(|am| (am.pubkey, am.is_signer, am.is_writable))
+            .collect::<Vec<_>>()
+    );
     println!("InitializePool IX Data Len: {}", init_ix.data.len());
 
     // Use manual message construction
@@ -1363,14 +1368,14 @@ fn test_initialize_pool_already_exists() -> Result<(), Box<dyn Error>> {
         program_id: setup.dex_pid,
         accounts: vec![
             AccountMeta::new(setup.payer.pubkey(), true),
-            AccountMeta::new(setup.pool_pda, false),             // Writable=false OK
-            AccountMeta::new(setup.vault_a_pk, false),             // Writable=false OK
-            AccountMeta::new(setup.vault_b_pk, false),             // Writable=false OK
-            AccountMeta::new(setup.lp_mint, false),                // Writable=false OK
+            AccountMeta::new(setup.pool_pda, false), // Writable=false OK
+            AccountMeta::new(setup.vault_a_pk, false), // Writable=false OK
+            AccountMeta::new(setup.vault_b_pk, false), // Writable=false OK
+            AccountMeta::new(setup.lp_mint, false),  // Writable=false OK
             AccountMeta::new_readonly(setup.mint_a, false),
             AccountMeta::new_readonly(setup.mint_b, false),
             AccountMeta::new_readonly(setup.plugin_pid, false),
-            AccountMeta::new(setup.plugin_state_pk, false),        // Writable=false OK
+            AccountMeta::new(setup.plugin_state_pk, false), // Writable=false OK
             AccountMeta::new_readonly(system_program::id(), false),
             AccountMeta::new_readonly(sysvar::rent::id(), false),
             AccountMeta::new_readonly(spl_token::id(), false), // ADDED
@@ -1389,20 +1394,29 @@ fn test_initialize_pool_already_exists() -> Result<(), Box<dyn Error>> {
     let message = Message::new(&[init_ix, memo_ix], Some(&setup.payer.pubkey())); // Include memo_ix
     println!("Constructed Re-Init Message: {:#?}", message);
     println!("Re-Init Message Account Keys: {:?}", message.account_keys);
-    println!("Re-Init Message Header: ({}, {}, {})", message.header.num_required_signatures, message.header.num_readonly_signed_accounts, message.header.num_readonly_unsigned_accounts);
+    println!(
+        "Re-Init Message Header: ({}, {}, {})",
+        message.header.num_required_signatures,
+        message.header.num_readonly_signed_accounts,
+        message.header.num_readonly_unsigned_accounts
+    );
 
     let mut tx = Transaction::new_unsigned(message); // Create unsigned
-    println!("Attempting to sign Re-Init Tx with Payer: {}", setup.payer.pubkey());
+    println!(
+        "Attempting to sign Re-Init Tx with Payer: {}",
+        setup.payer.pubkey()
+    );
     println!("Blockhash for Re-Init signing: {}", latest_blockhash);
     tx.sign(&[&setup.payer], latest_blockhash); // Sign
     println!("Re-Init Transaction signed successfully (apparently).");
 
     println!("Sending Re-InitializePool transaction...");
-    let result: Result<TransactionMetadata, FailedTransactionMetadata> = setup.svm.send_transaction(tx);
+    let result: Result<TransactionMetadata, FailedTransactionMetadata> =
+        setup.svm.send_transaction(tx);
     assert!(result.is_err(), "Re-initialize TX should fail");
 
     // Extract the FailedTransactionMetadata since we asserted it's Err
-    let failed_metadata = result.err().expect("Assertion failed: result was not Err");
+    let failed_metadata = result.expect_err("Assertion failed: result was not Err");
 
     // Access the TransactionError via the correct `.err` field
     let tx_error = failed_metadata.err;

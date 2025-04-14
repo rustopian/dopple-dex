@@ -1,20 +1,14 @@
+use crate::error::PoolError;
 use solana_program::{
-    pubkey::Pubkey,
-    program_error::ProgramError,
-    account_info::AccountInfo,
-    program_pack::Pack,
-    msg,
-    sysvar::{rent::Rent, Sysvar},
-    bpf_loader,
-    bpf_loader_upgradeable,
-    program_option::COption,
+    account_info::AccountInfo, bpf_loader, bpf_loader_upgradeable, msg,
+    program_error::ProgramError, program_option::COption, program_pack::Pack, pubkey::Pubkey,
+    sysvar::rent::Rent,
 };
+use spl_associated_token_account::get_associated_token_address;
 use spl_token::{
     state::{Account as TokenAccount, AccountState, Mint},
     ID as TOKEN_PROGRAM_ID,
 };
-use spl_associated_token_account::get_associated_token_address;
-use crate::error::PoolError;
 
 /// Struct to hold PDA information
 pub struct PdaInfo {
@@ -186,7 +180,10 @@ pub fn validate_token_account_basic(
 
     // Check if initialized (state check)
     if token_account_data.state != AccountState::Initialized {
-        msg!("Token Account Error: Account {} is not initialized", account_info.key);
+        msg!(
+            "Token Account Error: Account {} is not initialized",
+            account_info.key
+        );
         return Err(PoolError::InvalidAccountData.into());
     }
 
@@ -237,8 +234,8 @@ pub fn validate_mint_basic(
     // validate_rent_exemption(mint_info, rent)?;
 
     // Unpack Mint data
-    let mint_data = Mint::unpack(&mint_info.data.borrow())
-        .map_err(|_| PoolError::UnpackAccountFailed)?;
+    let mint_data =
+        Mint::unpack(&mint_info.data.borrow()).map_err(|_| PoolError::UnpackAccountFailed)?;
 
     // Check if initialized
     if !mint_data.is_initialized {
@@ -314,14 +311,16 @@ pub fn validate_executable(account_info: &AccountInfo) -> Result<(), ProgramErro
     }
 
     // Check owner is a BPF loader
-    if account_info.owner != &bpf_loader::id() && account_info.owner != &bpf_loader_upgradeable::id() {
-         msg!(
+    if account_info.owner != &bpf_loader::id()
+        && account_info.owner != &bpf_loader_upgradeable::id()
+    {
+        msg!(
             "Exec Error: Account {} owned by {}, expected a BPF loader",
             account_info.key,
             account_info.owner
         );
-         return Err(PoolError::InvalidAccountData.into());
+        return Err(PoolError::InvalidAccountData.into());
     }
 
     Ok(())
-} 
+}

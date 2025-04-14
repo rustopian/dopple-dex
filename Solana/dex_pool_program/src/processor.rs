@@ -13,18 +13,12 @@ use spl_token::state::Account as TokenAccount;
 
 use crate::error::PoolError;
 use crate::instruction::PoolInstruction;
-use crate::state::PoolState;
 use crate::pda::{
-    find_pool_address,
-    validate_executable,
-    validate_mint_basic,
-    validate_lp_mint_properties,
-    validate_lp_mint_zero_supply,
-    validate_program_id,
-    validate_rent_exemption,
-    validate_pool_vault,
-    validate_token_account_basic,
+    find_pool_address, validate_executable, validate_lp_mint_properties,
+    validate_lp_mint_zero_supply, validate_mint_basic, validate_pool_vault, validate_program_id,
+    validate_rent_exemption, validate_token_account_basic,
 };
+use crate::state::PoolState;
 
 /// For plugin <-> pool communication
 /// We'll reuse a struct for reading plugin's computed results.
@@ -112,7 +106,7 @@ impl Processor {
 
         // 5 & 6: Mint A & B must be different
         if mint_a_acc.key == mint_b_acc.key {
-                msg!("Mint A and Mint B cannot be the same");
+            msg!("Mint A and Mint B cannot be the same");
             return Err(PoolError::MintsMustBeDifferent.into());
         }
 
@@ -298,21 +292,12 @@ impl Processor {
         let lp_mint_data = validate_mint_basic(lp_mint_acc)?;
         validate_lp_mint_properties(&lp_mint_data, &expected_pda)?;
 
-        let _user_token_a_data = validate_token_account_basic(
-            user_token_a_acc,
-            user_acc.key,
-            &pool_data.token_mint_a,
-        )?;
-        let _user_token_b_data = validate_token_account_basic(
-            user_token_b_acc,
-            user_acc.key,
-            &pool_data.token_mint_b,
-        )?;
-        let _user_lp_data = validate_token_account_basic(
-            user_lp_acc,
-            user_acc.key,
-            &pool_data.lp_mint,
-        )?;
+        let _user_token_a_data =
+            validate_token_account_basic(user_token_a_acc, user_acc.key, &pool_data.token_mint_a)?;
+        let _user_token_b_data =
+            validate_token_account_basic(user_token_b_acc, user_acc.key, &pool_data.token_mint_b)?;
+        let _user_lp_data =
+            validate_token_account_basic(user_lp_acc, user_acc.key, &pool_data.lp_mint)?;
         // Plugin accounts are implicitly checked by CPI
 
         // --- Get Reserves (safe after validation) ---
@@ -507,14 +492,14 @@ impl Processor {
         }
 
         // --- Input Amount Check ---
-         if amount_lp == 0 {
-             return Err(PoolError::ZeroAmount.into());
-         }
-         // Check against current supply AFTER loading state
-         if amount_lp > pool_data.total_lp_supply {
-             // Use specific error? Or reuse InsufficientFunds?
-             return Err(PoolError::InsufficientFunds.into());
-         }
+        if amount_lp == 0 {
+            return Err(PoolError::ZeroAmount.into());
+        }
+        // Check against current supply AFTER loading state
+        if amount_lp > pool_data.total_lp_supply {
+            // Use specific error? Or reuse InsufficientFunds?
+            return Err(PoolError::InsufficientFunds.into());
+        }
 
         // --- Account Data Validations ---
         validate_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
@@ -524,23 +509,18 @@ impl Processor {
         validate_lp_mint_properties(&lp_mint_data, &expected_pda)?;
         // Note: We already check amount_lp <= total_lp_supply earlier
 
-        let _user_token_a_data = validate_token_account_basic(
-            user_token_a_acc,
-            user_acc.key,
-            &pool_data.token_mint_a,
-        )?;
-        let _user_token_b_data = validate_token_account_basic(
-            user_token_b_acc,
-            user_acc.key,
-            &pool_data.token_mint_b,
-        )?;
-        let user_lp_data = validate_token_account_basic(
-            user_lp_acc,
-            user_acc.key,
-            &pool_data.lp_mint,
-        )?;
+        let _user_token_a_data =
+            validate_token_account_basic(user_token_a_acc, user_acc.key, &pool_data.token_mint_a)?;
+        let _user_token_b_data =
+            validate_token_account_basic(user_token_b_acc, user_acc.key, &pool_data.token_mint_b)?;
+        let user_lp_data =
+            validate_token_account_basic(user_lp_acc, user_acc.key, &pool_data.lp_mint)?;
         if user_lp_data.amount < amount_lp {
-            msg!("User LP balance {} insufficient for burning {}", user_lp_data.amount, amount_lp);
+            msg!(
+                "User LP balance {} insufficient for burning {}",
+                user_lp_data.amount,
+                amount_lp
+            );
             return Err(PoolError::InsufficientFunds.into());
         }
         // Plugin accounts are implicitly checked by CPI
@@ -690,7 +670,7 @@ impl Processor {
             return Err(PoolError::ZeroAmount.into());
         }
         if user_src_acc.key == user_dst_acc.key {
-             msg!("User source and destination accounts cannot be the same");
+            msg!("User source and destination accounts cannot be the same");
             return Err(PoolError::InvalidArgument.into());
         }
 
@@ -728,33 +708,23 @@ impl Processor {
 
         // Validate user accounts and identify direction
         // Try validating src as Token A
-        let src_mint = if let Ok(user_src_data) = validate_token_account_basic(
-            user_src_acc,
-            user_acc.key,
-            &pool_data.token_mint_a,
-        ) {
+        let src_mint = if let Ok(user_src_data) =
+            validate_token_account_basic(user_src_acc, user_acc.key, &pool_data.token_mint_a)
+        {
             // Source is Token A, Destination must be Token B
-            let _user_dst_data = validate_token_account_basic(
-                user_dst_acc,
-                user_acc.key,
-                &pool_data.token_mint_b,
-            )?;
+            let _user_dst_data =
+                validate_token_account_basic(user_dst_acc, user_acc.key, &pool_data.token_mint_b)?;
             if user_src_data.amount < amount_in {
                 return Err(PoolError::InsufficientFunds.into());
             }
             pool_data.token_mint_a
-        } else if let Ok(user_src_data) = validate_token_account_basic(
-            user_src_acc,
-            user_acc.key,
-            &pool_data.token_mint_b,
-        ) {
+        } else if let Ok(user_src_data) =
+            validate_token_account_basic(user_src_acc, user_acc.key, &pool_data.token_mint_b)
+        {
             // Source is Token B, Destination must be Token A
-            let _user_dst_data = validate_token_account_basic(
-                user_dst_acc,
-                user_acc.key,
-                &pool_data.token_mint_a,
-            )?;
-             if user_src_data.amount < amount_in {
+            let _user_dst_data =
+                validate_token_account_basic(user_dst_acc, user_acc.key, &pool_data.token_mint_a)?;
+            if user_src_data.amount < amount_in {
                 return Err(PoolError::InsufficientFunds.into());
             }
             pool_data.token_mint_b
