@@ -4,10 +4,6 @@ This project implements the Dopple DEX, a decentralized exchange, on two differe
 
 Full LiteSVM and Multitest tests are included.
 
-## Security Matters
-
-Right now, `constant_product_plugin` can be called externally. This is okay, since the plugin doesn't actually control any balances; it only replies to requests for mathematical operations. Still, I'd like to analyze this for any potential exploits.
-
 - **Solana:** Contains the implementation for the Solana blockchain. See the [Solana README](./Solana/README.md) for details.
 - **CosmWasm:** Contains the implementation using the CosmWasm framework. See the [CosmWasm README](./CosmWasm/README.md) for details.
 
@@ -28,3 +24,7 @@ To ward off any unnecessary details, we'll ignore these:
 - Locked liquidity, staked liquidity, etc. All liquidity is subject to withdrawal at any time.
 - Single-token withdrawal. When LP tokens are burned, they give the user tokens from both sides, in equal measure according to the current balance between pools.
 - For CosmWasm, we'll ignore CW20 tokens - most assets of value are Token Factory or IBC assets, which act like native assets. Our Solana DEX, however, will definitely need to support SPL tokens in addition to SOL. We'll still demonstrate plenty of multi-contract interaction on the CosmWasm side, since LP tokens will be their own CW20 contracts.
+
+## Security Matters
+
+Right now, `constant_product_plugin` can be called externally. This is probably okay, since the plugin doesn't actually control any balances; it only replies to requests for mathematical operations.
