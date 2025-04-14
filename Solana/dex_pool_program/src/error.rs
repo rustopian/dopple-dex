@@ -123,6 +123,10 @@ pub enum PoolError {
     /// Provided vault account is not the correct ATA
     #[error("Incorrect vault ATA provided")]
     IncorrectVaultATA,
+
+    /// Invalid mint account provided (e.g., native SOL used for LP mint)
+    #[error("Invalid mint account")]
+    InvalidMint,
 }
 
 impl From<PoolError> for ProgramError {

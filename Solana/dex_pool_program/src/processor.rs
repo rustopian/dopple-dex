@@ -8,17 +8,30 @@ use solana_program::{
     pubkey::Pubkey,
     system_instruction,
     sysvar::{rent::Rent, Sysvar},
+    program_error::ProgramError,
 };
 use spl_token::state::Account as TokenAccount;
 
 use crate::error::PoolError;
 use crate::instruction::PoolInstruction;
-use crate::pda::{
-    find_pool_address, validate_executable, validate_lp_mint_properties,
-    validate_lp_mint_zero_supply, validate_mint_basic, validate_pool_vault, validate_program_id,
-    validate_rent_exemption, validate_token_account_basic,
-};
 use crate::state::PoolState;
+use crate::{NATIVE_MINT, constants};
+use crate::pda::{
+    find_pool_address,
+    find_sol_vault_address,
+    get_pool_seeds,
+    validate_executable,
+    validate_mint_basic,
+    validate_lp_mint_properties,
+    validate_lp_mint_zero_supply,
+    validate_program_id,
+    validate_rent_exemption,
+    validate_spl_pool_vault,
+    validate_sol_pool_vault,
+    validate_spl_token_account,
+    validate_user_sol_account,
+    SOL_VAULT_PREFIX,
+};
 
 /// For plugin <-> pool communication
 /// We'll reuse a struct for reading plugin's computed results.
@@ -69,16 +82,16 @@ impl Processor {
         let acc_iter = &mut accounts.iter();
         let payer_acc = next_account_info(acc_iter)?; // 0
         let pool_state_acc = next_account_info(acc_iter)?; // 1
-        let vault_a_acc = next_account_info(acc_iter)?; // 2
-        let vault_b_acc = next_account_info(acc_iter)?; // 3
-        let lp_mint_acc = next_account_info(acc_iter)?; // 4
-        let mint_a_acc = next_account_info(acc_iter)?; // 5
-        let mint_b_acc = next_account_info(acc_iter)?; // 6
-        let plugin_prog_acc = next_account_info(acc_iter)?; // 7
-        let plugin_state_acc = next_account_info(acc_iter)?; // 8
-        let system_acc = next_account_info(acc_iter)?; // 9
-        let rent_acc = next_account_info(acc_iter)?; // 10
-        let token_prog_acc = next_account_info(acc_iter)?; // 11
+        let vault_a_maybe = next_account_info(acc_iter).ok(); // 2? Optional
+        let vault_b_maybe = next_account_info(acc_iter).ok(); // 3? Optional
+        let lp_mint_acc = next_account_info(acc_iter)?; // 4 (or 2/3 if A/B native)
+        let mint_a_acc = next_account_info(acc_iter)?; // 5 (or 3/4)
+        let mint_b_acc = next_account_info(acc_iter)?; // 6 (or 4/5)
+        let plugin_prog_acc = next_account_info(acc_iter)?; // 7 (or 5/6)
+        let plugin_state_acc = next_account_info(acc_iter)?; // 8 (or 6/7)
+        let system_acc = next_account_info(acc_iter)?; // 9 (or 7/8)
+        let rent_acc = next_account_info(acc_iter)?; // 10 (or 8/9)
+        let token_prog_acc = next_account_info(acc_iter)?; // 11 (or 9/10)
 
         // --- Initial Validations ---
         msg!("Pool Init: Validating accounts...");
@@ -110,16 +123,31 @@ impl Processor {
             return Err(PoolError::MintsMustBeDifferent.into());
         }
 
+        // Validate mints (basic checks + rent)
+        let mint_a_is_native = mint_a_acc.key == &NATIVE_MINT;
+        let mint_b_is_native = mint_b_acc.key == &NATIVE_MINT;
+
+        if mint_a_is_native && mint_b_is_native {
+            msg!("Error: Both mints cannot be native SOL");
+            return Err(PoolError::InvalidArgument.into()); // Or a more specific error
+        }
+
+        let _mint_a_data = validate_mint_basic(mint_a_acc)?;
+        if !mint_a_is_native {
+            validate_rent_exemption(mint_a_acc, &rent)?;
+        }
+        let _mint_b_data = validate_mint_basic(mint_b_acc)?;
+        if !mint_b_is_native {
+            validate_rent_exemption(mint_b_acc, &rent)?;
+        }
+
         // --- PDA Derivation & Validation ---
         msg!("Pool Init: Deriving pool PDA...");
-        // Sort the mint addresses
         let (sort_mint_a, sort_mint_b) = if mint_a_acc.key < mint_b_acc.key {
             (mint_a_acc.key, mint_b_acc.key)
         } else {
             (mint_b_acc.key, mint_a_acc.key)
         };
-
-        // Derive the pool PDA
         let seeds = &[
             b"pool",
             sort_mint_a.as_ref(),
@@ -137,86 +165,106 @@ impl Processor {
             return Err(PoolError::IncorrectPoolPDA.into());
         }
 
-        // --- Mint & Vault Validations (using PDA and Rent) ---
-        msg!("Pool Init: Validating Mints and Vaults...");
-        // 5. Mint A (Basic Mint Checks + Rent)
-        let _mint_a_data = validate_mint_basic(mint_a_acc)?;
-        validate_rent_exemption(mint_a_acc, &rent)?;
-
-        // 6. Mint B (Basic Mint Checks + Rent)
-        let _mint_b_data = validate_mint_basic(mint_b_acc)?;
-        validate_rent_exemption(mint_b_acc, &rent)?;
-
-        // 4. LP Mint (Specific LP Mint Checks + Rent)
-        let lp_mint_data = validate_mint_basic(lp_mint_acc)?;
+        // --- LP Mint, Vault Account Derivation/Validation/Creation ---
+        msg!("Pool Init: Validating/Creating Vaults & LP Mint...");
+        // LP Mint (Always SPL)
+        let lp_mint_data_option = validate_mint_basic(lp_mint_acc)?;
+        let lp_mint_data = lp_mint_data_option.ok_or(PoolError::InvalidMint)?;
         validate_lp_mint_properties(&lp_mint_data, &expected_pool_pda)?;
         validate_lp_mint_zero_supply(&lp_mint_data)?;
         validate_rent_exemption(lp_mint_acc, &rent)?;
 
-        // 2. Vault A
-        validate_pool_vault(vault_a_acc, &expected_pool_pda, mint_a_acc.key)?;
-        // Rent implicitly checked by ATA creation on client, not checked here
+        let mut vault_a_address: Pubkey;
+        let mut vault_b_address: Pubkey;
+        let pool_pda_signer_seeds = &[
+            b"pool",
+            sort_mint_a.as_ref(),
+            sort_mint_b.as_ref(),
+            plugin_prog_acc.key.as_ref(),
+            plugin_state_acc.key.as_ref(),
+            &[bump],
+        ];
 
-        // 3. Vault B
-        validate_pool_vault(vault_b_acc, &expected_pool_pda, mint_b_acc.key)?;
-        // Rent implicitly checked by ATA creation on client, not checked here
-        msg!("Pool Init: All account validations passed.");
+        // Vault A
+        if mint_a_is_native {
+            let (sol_vault_a_pda, sol_vault_a_bump) = find_sol_vault_address(&expected_pool_pda, program_id);
+            vault_a_address = sol_vault_a_pda;
+            msg!("Creating SOL Vault A PDA: {}", sol_vault_a_pda);
+            let sol_vault_a_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_a_bump]];
+            invoke_signed(
+                &system_instruction::create_account(
+                    payer_acc.key,
+                    &sol_vault_a_pda,
+                    rent.minimum_balance(0),
+                    0, // space
+                    program_id, // owner
+                ),
+                &[payer_acc.clone(), system_acc.clone(), pool_state_acc.clone()],
+                &[sol_vault_a_signer_seeds],
+            )?;
+        } else {
+            let vault_a_acc = vault_a_maybe.ok_or(ProgramError::NotEnoughAccountKeys)?;
+            validate_spl_pool_vault(vault_a_acc, &expected_pool_pda, mint_a_acc.key)?;
+            vault_a_address = *vault_a_acc.key;
+        }
 
-        // --- Account Creation & State Initialization ---
-        msg!("Pool Init: Constructing initial state...");
+        // Vault B
+        if mint_b_is_native {
+            let (sol_vault_b_pda, sol_vault_b_bump) = find_sol_vault_address(&expected_pool_pda, program_id);
+            vault_b_address = sol_vault_b_pda;
+            msg!("Creating SOL Vault B PDA: {}", sol_vault_b_pda);
+            let sol_vault_b_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_b_bump]];
+            invoke_signed(
+                &system_instruction::create_account(
+                    payer_acc.key,
+                    &sol_vault_b_pda,
+                    rent.minimum_balance(0),
+                    0, // space
+                    program_id, // owner
+                ),
+                &[payer_acc.clone(), system_acc.clone(), pool_state_acc.clone()],
+                &[sol_vault_b_signer_seeds],
+            )?;
+        } else {
+            let vault_b_acc = vault_b_maybe.ok_or(ProgramError::NotEnoughAccountKeys)?;
+            validate_spl_pool_vault(vault_b_acc, &expected_pool_pda, mint_b_acc.key)?;
+            vault_b_address = *vault_b_acc.key;
+        }
 
-        // Construct initial PoolState data to get its serialized size
-        let initial_pool_data = PoolState {
+        // --- Pool State Account Creation & State Initialization ---
+        msg!("Pool Init: Creating Pool State Account...");
+
+        // Calculate PoolState size using temporary serialization
+        let temp_pool_state_data = PoolState {
             token_mint_a: *mint_a_acc.key,
             token_mint_b: *mint_b_acc.key,
-            vault_a: *vault_a_acc.key,
-            vault_b: *vault_b_acc.key,
+            vault_a: vault_a_address,
+            vault_b: vault_b_address,
             lp_mint: *lp_mint_acc.key,
             total_lp_supply: 0,
             bump,
             plugin_program_id: *plugin_prog_acc.key,
             plugin_state_pubkey: *plugin_state_acc.key,
         };
-        let pool_data_bytes = initial_pool_data.try_to_vec()?;
-        let pool_space = pool_data_bytes.len(); // Use serialized length
+        let pool_state_size = borsh::to_vec(&temp_pool_state_data)?.len();
+        let needed_lamports = rent.minimum_balance(pool_state_size);
 
-        // Restore account creation CPI using serialized size
-        msg!("Pool: Preparing invoke_signed create_account...");
-        // let pool_space = std::mem::size_of::<PoolState>(); // Old way
-        let needed_lamports = rent.minimum_balance(pool_space);
-        msg!(
-            "  Space (serialized): {}, Lamports: {}",
-            pool_space,
-            needed_lamports
-        );
         invoke_signed(
             &system_instruction::create_account(
                 payer_acc.key,
                 pool_state_acc.key,
                 needed_lamports,
-                pool_space as u64, // Use serialized size
-                program_id,        // Owner is self
+                pool_state_size as u64,
+                program_id,
             ),
-            // Accounts for the CPI call itself
-            &[
-                payer_acc.clone(),
-                pool_state_acc.clone(), // The account being created
-                system_acc.clone(),
-            ],
-            // Seeds for signing as the PDA
-            &[&[
-                b"pool",
-                sort_mint_a.as_ref(),
-                sort_mint_b.as_ref(),
-                plugin_prog_acc.key.as_ref(),
-                plugin_state_acc.key.as_ref(),
-                &[bump],
-            ]],
+            &[payer_acc.clone(), pool_state_acc.clone(), system_acc.clone()],
+            &[pool_pda_signer_seeds],
         )?;
-        msg!("Pool: invoke_signed successful.");
 
-        let mut account_data_borrow = pool_state_acc.data.borrow_mut();
-        account_data_borrow.copy_from_slice(&pool_data_bytes);
+        msg!("Pool Init: Writing initial state...");
+        // Now serialize the final state into the created account
+        temp_pool_state_data.serialize(&mut *pool_state_acc.data.borrow_mut())?;
+
         msg!("Pool: Initialized state written successfully.");
 
         Ok(())
@@ -241,6 +289,7 @@ impl Processor {
         let token_prog_acc = next_account_info(acc_iter)?; // 8
         let plugin_prog_acc = next_account_info(acc_iter)?; // 9
         let plugin_state_acc = next_account_info(acc_iter)?; // 10
+        let system_acc = next_account_info(acc_iter)?; // 11
 
         // --- Load State & Basic Checks ---
         if !user_acc.is_signer {
@@ -248,6 +297,7 @@ impl Processor {
         }
         let mut pool_data = PoolState::try_from_slice(&pool_state_acc.data.borrow())?;
         validate_program_id(token_prog_acc, &spl_token::id())?;
+        validate_program_id(system_acc, &solana_program::system_program::id())?;
 
         // --- PDA Re-derivation & Pool State Check ---
         let (expected_pda, _bump) = find_pool_address(
@@ -279,25 +329,43 @@ impl Processor {
         }
 
         // --- Account Data Validations ---
-        validate_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
-        validate_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
+        validate_spl_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
+        validate_spl_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
         // Validate LP Mint (Properties only, supply can be non-zero)
-        let lp_mint_data = validate_mint_basic(lp_mint_acc)?;
+        let lp_mint_data_option = validate_mint_basic(lp_mint_acc)?;
+        let lp_mint_data = lp_mint_data_option.ok_or(PoolError::InvalidMint)?;
         validate_lp_mint_properties(&lp_mint_data, &expected_pda)?;
 
-        let _user_token_a_data =
-            validate_token_account_basic(user_token_a_acc, user_acc.key, &pool_data.token_mint_a)?;
-        let _user_token_b_data =
-            validate_token_account_basic(user_token_b_acc, user_acc.key, &pool_data.token_mint_b)?;
-        let _user_lp_data =
-            validate_token_account_basic(user_lp_acc, user_acc.key, &pool_data.lp_mint)?;
+        let _user_token_a_data = validate_spl_token_account(
+            user_token_a_acc,
+            user_acc.key,
+            &pool_data.token_mint_a,
+        )?;
+        let _user_token_b_data = validate_spl_token_account(
+            user_token_b_acc,
+            user_acc.key,
+            &pool_data.token_mint_b,
+        )?;
+        let _user_lp_data = validate_spl_token_account(
+            user_lp_acc,
+            user_acc.key,
+            &pool_data.lp_mint,
+        )?;
         // Plugin accounts are implicitly checked by CPI
 
         // --- Get Reserves (safe after validation) ---
-        let vault_a_data = TokenAccount::unpack(&vault_a_acc.data.borrow())?;
-        let vault_b_data = TokenAccount::unpack(&vault_b_acc.data.borrow())?;
-        let reserve_a = vault_a_data.amount;
-        let reserve_b = vault_b_data.amount;
+        let reserve_a = if pool_data.token_mint_a == NATIVE_MINT {
+            // Subtract rent reserve? For simplicity, let's assume the full balance is usable for now.
+            // A production system might need `vault_a_acc.lamports().checked_sub(rent.minimum_balance(0)).unwrap_or(0)`
+            vault_a_acc.lamports()
+        } else {
+            TokenAccount::unpack(&vault_a_acc.data.borrow())?.amount
+        };
+        let reserve_b = if pool_data.token_mint_b == NATIVE_MINT {
+            vault_b_acc.lamports()
+        } else {
+            TokenAccount::unpack(&vault_b_acc.data.borrow())?.amount
+        };
 
         // Log keys before CPI setup
         msg!("Pool->Plugin CPI Prep: Pool PDA: {}", pool_state_acc.key);
@@ -351,51 +419,66 @@ impl Processor {
             return Err(PoolError::ZeroAmount.into());
         }
 
+        // --- Perform Transfers (Conditional) ---
         // Transfer actual_a from user -> vaultA
-        let transfer_a_ix = spl_token::instruction::transfer(
-            token_prog_acc.key,
-            user_token_a_acc.key,
-            vault_a_acc.key,
-            user_acc.key,
-            &[],
-            actual_a,
-        )?;
-        invoke(
-            &transfer_a_ix,
-            &[
-                user_token_a_acc.clone(),
-                vault_a_acc.clone(),
-                user_acc.clone(),
-                token_prog_acc.clone(),
-            ],
-        )?;
+        if pool_data.token_mint_a == NATIVE_MINT {
+            invoke(
+                &system_instruction::transfer(user_acc.key, vault_a_acc.key, actual_a),
+                &[user_acc.clone(), vault_a_acc.clone(), system_acc.clone()], // System Program needed
+            )?;
+        } else {
+            let transfer_a_ix = spl_token::instruction::transfer(
+                token_prog_acc.key,
+                user_token_a_acc.key,
+                vault_a_acc.key,
+                user_acc.key,
+                &[],
+                actual_a,
+            )?;
+            invoke(
+                &transfer_a_ix,
+                &[
+                    user_token_a_acc.clone(),
+                    vault_a_acc.clone(),
+                    user_acc.clone(),
+                    token_prog_acc.clone(),
+                ],
+            )?;
+        }
 
         // Transfer actual_b from user -> vaultB
-        let transfer_b_ix = spl_token::instruction::transfer(
-            token_prog_acc.key,
-            user_token_b_acc.key,
-            vault_b_acc.key,
-            user_acc.key,
-            &[],
-            actual_b,
-        )?;
-        invoke(
-            &transfer_b_ix,
-            &[
-                user_token_b_acc.clone(),
-                vault_b_acc.clone(),
-                user_acc.clone(),
-                token_prog_acc.clone(),
-            ],
-        )?;
+        if pool_data.token_mint_b == NATIVE_MINT {
+             invoke(
+                &system_instruction::transfer(user_acc.key, vault_b_acc.key, actual_b),
+                &[user_acc.clone(), vault_b_acc.clone(), system_acc.clone()], // System Program needed
+            )?;
+        } else {
+            let transfer_b_ix = spl_token::instruction::transfer(
+                token_prog_acc.key,
+                user_token_b_acc.key,
+                vault_b_acc.key,
+                user_acc.key,
+                &[],
+                actual_b,
+            )?;
+            invoke(
+                &transfer_b_ix,
+                &[
+                    user_token_b_acc.clone(),
+                    vault_b_acc.clone(),
+                    user_acc.clone(),
+                    token_prog_acc.clone(),
+                ],
+            )?;
+        }
 
-        // Mint LP to user
-        let (sorted_mint_a, sorted_mint_b) =
+        // Mint LP to user (Always SPL)
+        let (sorted_mint_a_key, sorted_mint_b_key) = // Store result of sorted()
             sorted(&pool_data.token_mint_a, &pool_data.token_mint_b);
         let sign_seeds = &[
             b"pool",
-            sorted_mint_a.as_ref(),
-            sorted_mint_b.as_ref(),
+            sorted_mint_a_key.as_ref(),
+            sorted_mint_b_key.as_ref(),
             pool_data.plugin_program_id.as_ref(),
             pool_data.plugin_state_pubkey.as_ref(),
             &[pool_data.bump],
@@ -447,6 +530,8 @@ impl Processor {
         let token_prog_acc = next_account_info(acc_iter)?; // 8
         let plugin_prog_acc = next_account_info(acc_iter)?; // 9
         let plugin_state_acc = next_account_info(acc_iter)?; // 10
+        let system_acc = next_account_info(acc_iter)?; // 11
+        let rent_acc = next_account_info(acc_iter)?; // 12
 
         // --- Load State & Basic Checks ---
         if !user_acc.is_signer {
@@ -454,6 +539,9 @@ impl Processor {
         }
         let mut pool_data = PoolState::try_from_slice(&pool_state_acc.data.borrow())?;
         validate_program_id(token_prog_acc, &spl_token::id())?;
+        validate_program_id(system_acc, &solana_program::system_program::id())?;
+        validate_program_id(rent_acc, &solana_program::sysvar::rent::id())?;
+        let rent = Rent::from_account_info(rent_acc)?;
 
         // --- PDA Re-derivation & Pool State Check ---
         let (expected_pda, _bump) = find_pool_address(
@@ -493,34 +581,54 @@ impl Processor {
         }
 
         // --- Account Data Validations ---
-        validate_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
-        validate_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
-        // Validate LP Mint (Properties only, supply should be > 0 here)
-        let lp_mint_data = validate_mint_basic(lp_mint_acc)?;
-        validate_lp_mint_properties(&lp_mint_data, &expected_pda)?;
-        // Note: We already check amount_lp <= total_lp_supply earlier
+        let mut user_token_a_is_sol = false;
+        let mut user_token_b_is_sol = false;
 
-        let _user_token_a_data =
-            validate_token_account_basic(user_token_a_acc, user_acc.key, &pool_data.token_mint_a)?;
-        let _user_token_b_data =
-            validate_token_account_basic(user_token_b_acc, user_acc.key, &pool_data.token_mint_b)?;
-        let user_lp_data =
-            validate_token_account_basic(user_lp_acc, user_acc.key, &pool_data.lp_mint)?;
+        if pool_data.token_mint_a == NATIVE_MINT {
+            validate_sol_pool_vault(vault_a_acc, &pool_data.vault_a, program_id)?;
+            validate_user_sol_account(user_token_a_acc, user_acc.key, false, true)?;
+            user_token_a_is_sol = true;
+        } else {
+            validate_spl_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
+            let _ = validate_spl_token_account(user_token_a_acc, user_acc.key, &pool_data.token_mint_a)?;
+        }
+        if pool_data.token_mint_b == NATIVE_MINT {
+            validate_sol_pool_vault(vault_b_acc, &pool_data.vault_b, program_id)?;
+            validate_user_sol_account(user_token_b_acc, user_acc.key, false, true)?;
+            user_token_b_is_sol = true;
+        } else {
+            validate_spl_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
+            let _ = validate_spl_token_account(user_token_b_acc, user_acc.key, &pool_data.token_mint_b)?;
+        }
+
+        // Validate LP Mint (Properties only, supply should be > 0 here)
+        let lp_mint_data_option = validate_mint_basic(lp_mint_acc)?;
+        let _lp_mint_data = lp_mint_data_option.ok_or(PoolError::InvalidMint)?;
+        validate_lp_mint_properties(&_lp_mint_data, &expected_pda)?;
+
+        // Validate user LP account (Always SPL)
+        let user_lp_data = validate_spl_token_account(
+            user_lp_acc,
+            user_acc.key,
+            &pool_data.lp_mint,
+        )?;
         if user_lp_data.amount < amount_lp {
-            msg!(
-                "User LP balance {} insufficient for burning {}",
-                user_lp_data.amount,
-                amount_lp
-            );
+            msg!("User LP balance {} insufficient for burning {}", user_lp_data.amount, amount_lp);
             return Err(PoolError::InsufficientFunds.into());
         }
         // Plugin accounts are implicitly checked by CPI
 
         // --- Get Reserves (safe after validation) ---
-        let vault_a_data = TokenAccount::unpack(&vault_a_acc.data.borrow())?;
-        let vault_b_data = TokenAccount::unpack(&vault_b_acc.data.borrow())?;
-        let reserve_a = vault_a_data.amount;
-        let reserve_b = vault_b_data.amount;
+         let reserve_a = if pool_data.token_mint_a == NATIVE_MINT {
+            vault_a_acc.lamports()
+        } else {
+            TokenAccount::unpack(&vault_a_acc.data.borrow())?.amount
+        };
+        let reserve_b = if pool_data.token_mint_b == NATIVE_MINT {
+            vault_b_acc.lamports()
+        } else {
+            TokenAccount::unpack(&vault_b_acc.data.borrow())?.amount
+        };
 
         // plugin cpi -- Inlined
         let ix_data =
@@ -552,7 +660,7 @@ impl Processor {
         let withdraw_a = plugin_calc.withdraw_a;
         let withdraw_b = plugin_calc.withdraw_b;
 
-        // Burn user's LP - User must authorize this
+        // Burn user's LP (Always SPL)
         let burn_ix = spl_token::instruction::burn(
             token_prog_acc.key,
             user_lp_acc.key,    // Account to burn from
@@ -564,62 +672,89 @@ impl Processor {
         invoke(
             &burn_ix,
             &[
-                user_lp_acc.clone(),    // Source account
-                lp_mint_acc.clone(),    // Mint account
-                user_acc.clone(),       // Authority account
-                token_prog_acc.clone(), // Token program
+                user_lp_acc.clone(),
+                lp_mint_acc.clone(),
+                user_acc.clone(),
+                token_prog_acc.clone(),
             ],
         )?;
 
-        // Transfer out token A - Pool PDA must authorize this
-        let (sorted_mint_a, sorted_mint_b) =
+        // --- Perform Transfers Out (Conditional) ---
+        let (sorted_mint_a_key, sorted_mint_b_key) = // Store result
             sorted(&pool_data.token_mint_a, &pool_data.token_mint_b);
-        let sign_seeds = &[
+        let pool_signer_seeds = &[ // Base seeds for pool PDA signing
             b"pool",
-            sorted_mint_a.as_ref(),
-            sorted_mint_b.as_ref(),
+            sorted_mint_a_key.as_ref(), // Use variable
+            sorted_mint_b_key.as_ref(), // Use variable
             pool_data.plugin_program_id.as_ref(),
             pool_data.plugin_state_pubkey.as_ref(),
             &[pool_data.bump],
         ];
-        let transfer_a_ix = spl_token::instruction::transfer(
-            token_prog_acc.key,
-            vault_a_acc.key,      // Source (Pool's vault)
-            user_token_a_acc.key, // Destination (User's ATA)
-            pool_state_acc.key,   // Authority (Pool PDA)
-            &[],
-            withdraw_a,
-        )?;
-        invoke_signed(
-            &transfer_a_ix,
-            &[
-                vault_a_acc.clone(),
-                user_token_a_acc.clone(),
-                pool_state_acc.clone(), // Authority (Pool PDA)
-                token_prog_acc.clone(),
-            ],
-            &[sign_seeds],
-        )?;
 
-        // Transfer out token B - Pool PDA must authorize this
-        let transfer_b_ix = spl_token::instruction::transfer(
-            token_prog_acc.key,
-            vault_b_acc.key,      // Source (Pool's vault)
-            user_token_b_acc.key, // Destination (User's ATA)
-            pool_state_acc.key,   // Authority (Pool PDA)
-            &[],
-            withdraw_b,
-        )?;
-        invoke_signed(
-            &transfer_b_ix,
-            &[
-                vault_b_acc.clone(),
-                user_token_b_acc.clone(),
-                pool_state_acc.clone(), // Authority (Pool PDA)
-                token_prog_acc.clone(),
-            ],
-            &[sign_seeds],
-        )?;
+        // Transfer out token A
+        if user_token_a_is_sol {
+            // Check sufficient lamports in vault (leave rent minimum)
+            let rent_minimum = rent.minimum_balance(0);
+            if vault_a_acc.lamports().saturating_sub(rent_minimum) < withdraw_a {
+                 return Err(PoolError::InsufficientFunds.into());
+            }
+            invoke_signed(
+                &system_instruction::transfer(pool_state_acc.key, user_token_a_acc.key, withdraw_a),
+                &[pool_state_acc.clone(), user_token_a_acc.clone(), system_acc.clone()],
+                &[pool_signer_seeds],
+            )?;
+        } else {
+            let transfer_a_ix = spl_token::instruction::transfer(
+                token_prog_acc.key,
+                vault_a_acc.key,      // Source (Pool's vault)
+                user_token_a_acc.key, // Destination (User's ATA)
+                pool_state_acc.key,   // Authority (Pool PDA)
+                &[],
+                withdraw_a,
+            )?;
+            invoke_signed(
+                &transfer_a_ix,
+                &[
+                    vault_a_acc.clone(),
+                    user_token_a_acc.clone(),
+                    pool_state_acc.clone(),
+                    token_prog_acc.clone(),
+                ],
+                &[pool_signer_seeds],
+            )?;
+        }
+
+        // Transfer out token B
+        if user_token_b_is_sol {
+             let rent_minimum = rent.minimum_balance(0);
+            if vault_b_acc.lamports().saturating_sub(rent_minimum) < withdraw_b {
+                 return Err(PoolError::InsufficientFunds.into());
+            }
+             invoke_signed(
+                &system_instruction::transfer(pool_state_acc.key, user_token_b_acc.key, withdraw_b),
+                &[pool_state_acc.clone(), user_token_b_acc.clone(), system_acc.clone()],
+                &[pool_signer_seeds],
+            )?;
+        } else {
+            let transfer_b_ix = spl_token::instruction::transfer(
+                token_prog_acc.key,
+                vault_b_acc.key,
+                user_token_b_acc.key,
+                pool_state_acc.key,
+                &[],
+                withdraw_b,
+            )?;
+            invoke_signed(
+                &transfer_b_ix,
+                &[
+                    vault_b_acc.clone(),
+                    user_token_b_acc.clone(),
+                    pool_state_acc.clone(),
+                    token_prog_acc.clone(),
+                ],
+                &[pool_signer_seeds],
+            )?;
+        }
 
         // Update supply
         pool_data.total_lp_supply = pool_data
@@ -648,6 +783,8 @@ impl Processor {
         let token_prog_acc = next_account_info(acc_iter)?; // 6
         let plugin_prog_acc = next_account_info(acc_iter)?; // 7
         let plugin_state_acc = next_account_info(acc_iter)?; // 8
+        let system_acc = next_account_info(acc_iter)?; // 9
+        let rent_acc = next_account_info(acc_iter)?; // 10
 
         // --- Load State & Basic Checks ---
         if !user_acc.is_signer {
@@ -655,6 +792,9 @@ impl Processor {
         }
         let pool_data = PoolState::try_from_slice(&pool_state_acc.data.borrow())?;
         validate_program_id(token_prog_acc, &spl_token::id())?;
+        validate_program_id(system_acc, &solana_program::system_program::id())?;
+        validate_program_id(rent_acc, &solana_program::sysvar::rent::id())?;
+        let rent = Rent::from_account_info(rent_acc)?;
         if amount_in == 0 {
             return Err(PoolError::ZeroAmount.into());
         }
@@ -682,7 +822,6 @@ impl Processor {
         if vault_b_acc.key != &pool_data.vault_b {
             return Err(PoolError::VaultMismatch.into());
         }
-        // Swap doesn't use LP mint
         if plugin_prog_acc.key != &pool_data.plugin_program_id {
             return Err(PoolError::PluginProgramIdMismatch.into());
         }
@@ -691,50 +830,83 @@ impl Processor {
         }
 
         // --- Account Data Validations & Determine Swap Direction ---
+        let mint_a_is_native = pool_data.token_mint_a == NATIVE_MINT;
+        let mint_b_is_native = pool_data.token_mint_b == NATIVE_MINT;
+
         // Validate vaults first
-        validate_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
-        validate_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
+        if mint_a_is_native {
+            validate_sol_pool_vault(vault_a_acc, &pool_data.vault_a, program_id)?;
+        } else {
+            validate_spl_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
+        }
+        if mint_b_is_native {
+            validate_sol_pool_vault(vault_b_acc, &pool_data.vault_b, program_id)?;
+        } else {
+            validate_spl_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
+        }
 
         // Validate user accounts and identify direction
-        // Try validating src as Token A
-        let src_mint = if let Ok(user_src_data) =
-            validate_token_account_basic(user_src_acc, user_acc.key, &pool_data.token_mint_a)
-        {
-            // Source is Token A, Destination must be Token B
-            let _user_dst_data =
-                validate_token_account_basic(user_dst_acc, user_acc.key, &pool_data.token_mint_b)?;
-            if user_src_data.amount < amount_in {
-                return Err(PoolError::InsufficientFunds.into());
+        let (src_mint, reserve_in_acc, reserve_out_acc) = if !mint_a_is_native && !mint_b_is_native {
+             // Standard SPL -> SPL swap
+            if let Ok(user_src_data) = validate_spl_token_account(user_src_acc, user_acc.key, &pool_data.token_mint_a) {
+                let _ = validate_spl_token_account(user_dst_acc, user_acc.key, &pool_data.token_mint_b)?;
+                if user_src_data.amount < amount_in { return Err(PoolError::InsufficientFunds.into()); }
+                (pool_data.token_mint_a, vault_a_acc, vault_b_acc)
+            } else if let Ok(user_src_data) = validate_spl_token_account(user_src_acc, user_acc.key, &pool_data.token_mint_b) {
+                let _ = validate_spl_token_account(user_dst_acc, user_acc.key, &pool_data.token_mint_a)?;
+                if user_src_data.amount < amount_in { return Err(PoolError::InsufficientFunds.into()); }
+                (pool_data.token_mint_b, vault_b_acc, vault_a_acc)
+            } else {
+                msg!("Invalid SPL user source token account or mint mismatch");
+                return Err(PoolError::TokenMintMismatch.into());
             }
-            pool_data.token_mint_a
-        } else if let Ok(user_src_data) =
-            validate_token_account_basic(user_src_acc, user_acc.key, &pool_data.token_mint_b)
-        {
-            // Source is Token B, Destination must be Token A
-            let _user_dst_data =
-                validate_token_account_basic(user_dst_acc, user_acc.key, &pool_data.token_mint_a)?;
-            if user_src_data.amount < amount_in {
-                return Err(PoolError::InsufficientFunds.into());
+        } else if mint_a_is_native { // Token A is SOL, Token B is SPL
+            if let Ok(()) = validate_user_sol_account(user_src_acc, user_acc.key, true, false) { // Check user SOL src
+                let _ = validate_spl_token_account(user_dst_acc, user_acc.key, &pool_data.token_mint_b)?; // Dest must be SPL B
+                if user_src_acc.lamports() < amount_in { return Err(PoolError::InsufficientFunds.into()); }
+                (pool_data.token_mint_a, vault_a_acc, vault_b_acc)
+            } else if let Ok(user_src_data) = validate_spl_token_account(user_src_acc, user_acc.key, &pool_data.token_mint_b) { // Check user SPL B src
+                let _ = validate_user_sol_account(user_dst_acc, user_acc.key, false, true)?; // Dest must be SOL A
+                if user_src_data.amount < amount_in { return Err(PoolError::InsufficientFunds.into()); }
+                 (pool_data.token_mint_b, vault_b_acc, vault_a_acc)
+            } else {
+                 msg!("Invalid user source account (SOL A / SPL B pool)");
+                 return Err(PoolError::TokenMintMismatch.into());
             }
-            pool_data.token_mint_b
-        } else {
-            // Source account matches neither mint A nor mint B, or fails basic validation
-            msg!("Invalid user source token account or mint mismatch");
-            return Err(PoolError::TokenMintMismatch.into());
-        };
-
-        // Identify reserve accounts based on src_mint
-        let (reserve_in_acc, reserve_out_acc) = if src_mint == pool_data.token_mint_a {
-            (vault_a_acc, vault_b_acc)
-        } else {
-            (vault_b_acc, vault_a_acc)
+        } else { // Token B is SOL, Token A is SPL (mint_b_is_native must be true)
+             if let Ok(user_src_data) = validate_spl_token_account(user_src_acc, user_acc.key, &pool_data.token_mint_a) { // Check user SPL A src
+                 let _ = validate_user_sol_account(user_dst_acc, user_acc.key, false, true)?; // Dest must be SOL B
+                 if user_src_data.amount < amount_in { return Err(PoolError::InsufficientFunds.into()); }
+                 (pool_data.token_mint_a, vault_a_acc, vault_b_acc)
+             } else if let Ok(()) = validate_user_sol_account(user_src_acc, user_acc.key, true, false) { // Check user SOL B src
+                 let _ = validate_spl_token_account(user_dst_acc, user_acc.key, &pool_data.token_mint_a)?; // Dest must be SPL A
+                 if user_src_acc.lamports() < amount_in { return Err(PoolError::InsufficientFunds.into()); }
+                 (pool_data.token_mint_b, vault_b_acc, vault_a_acc)
+             } else {
+                  msg!("Invalid user source account (SPL A / SOL B pool)");
+                  return Err(PoolError::TokenMintMismatch.into());
+             }
         };
 
         // --- Get Reserves (safe after validation) ---
-        let reserve_in_data = TokenAccount::unpack(&reserve_in_acc.data.borrow())?;
-        let reserve_out_data = TokenAccount::unpack(&reserve_out_acc.data.borrow())?;
-        let r_in = reserve_in_data.amount;
-        let r_out = reserve_out_data.amount;
+        let r_in = if src_mint == NATIVE_MINT {
+            reserve_in_acc.lamports()
+        } else {
+            TokenAccount::unpack(&reserve_in_acc.data.borrow())?.amount
+        };
+        let r_out = if reserve_out_acc.key == &pool_data.vault_a { // Check which vault is the out vault
+            if mint_a_is_native {
+                reserve_out_acc.lamports()
+            } else {
+                 TokenAccount::unpack(&reserve_out_acc.data.borrow())?.amount
+            }
+        } else { // reserve_out_acc must be vault_b
+            if mint_b_is_native {
+                reserve_out_acc.lamports()
+            } else {
+                 TokenAccount::unpack(&reserve_out_acc.data.borrow())?.amount
+            }
+        };
 
         // plugin cpi -- Inlined
         let ix_data = constant_product_plugin::instruction::PluginInstruction::ComputeSwap {
@@ -767,30 +939,36 @@ impl Processor {
             return Err(PoolError::ZeroAmount.into());
         }
 
-        // Transfer in from user -> reserve_in
-        let transfer_in_ix = spl_token::instruction::transfer(
-            token_prog_acc.key,
-            user_src_acc.key,
-            reserve_in_acc.key,
-            user_acc.key,
-            &[],
-            amount_in,
-        )?;
-        invoke(
-            &transfer_in_ix,
-            // Revert back to passing all required accounts, including token_prog_acc
-            &[
-                user_src_acc.clone(),
-                reserve_in_acc.clone(),
-                user_acc.clone(),
-                token_prog_acc.clone(), // Re-added
-            ],
-        )?;
+        // Transfer In: User -> Pool Vault
+        if src_mint == NATIVE_MINT {
+             invoke(
+                &system_instruction::transfer(user_acc.key, reserve_in_acc.key, amount_in),
+                &[user_acc.clone(), reserve_in_acc.clone(), system_acc.clone()],
+            )?;
+        } else {
+            let transfer_in_ix = spl_token::instruction::transfer(
+                token_prog_acc.key,
+                user_src_acc.key,
+                reserve_in_acc.key,
+                user_acc.key,
+                &[],
+                amount_in,
+            )?;
+            invoke(
+                &transfer_in_ix,
+                &[
+                    user_src_acc.clone(),
+                    reserve_in_acc.clone(),
+                    user_acc.clone(),
+                    token_prog_acc.clone(),
+                ],
+            )?;
+        }
 
-        // Transfer out from reserve_out -> user_dst (pool signs)
-        let (sorted_mint_a_key, sorted_mint_b_key) = // Store result of sorted()
+        // Transfer Out: Pool Vault -> User
+        let (sorted_mint_a_key, sorted_mint_b_key) = // Store result
             sorted(&pool_data.token_mint_a, &pool_data.token_mint_b);
-        let sign_seeds = &[
+        let pool_signer_seeds = &[ // Base seeds for pool PDA signing
             b"pool",
             sorted_mint_a_key.as_ref(), // Use variable
             sorted_mint_b_key.as_ref(), // Use variable
@@ -798,25 +976,40 @@ impl Processor {
             pool_data.plugin_state_pubkey.as_ref(),
             &[pool_data.bump],
         ];
-        let transfer_out_ix = spl_token::instruction::transfer(
-            token_prog_acc.key,
-            reserve_out_acc.key,
-            user_dst_acc.key,
-            pool_state_acc.key,
-            &[],
-            amount_out,
-        )?;
-        invoke_signed(
-            &transfer_out_ix,
-            // Revert back to passing all required accounts, including token_prog_acc
-            &[
-                reserve_out_acc.clone(),
-                user_dst_acc.clone(),
-                pool_state_acc.clone(),
-                token_prog_acc.clone(), // Re-added
-            ],
-            &[sign_seeds],
-        )?;
+        let reserve_out_is_sol = (reserve_out_acc.key == vault_a_acc.key && mint_a_is_native) ||
+                                   (reserve_out_acc.key == vault_b_acc.key && mint_b_is_native);
+
+        if reserve_out_is_sol {
+            // Check sufficient lamports in vault (leave rent minimum)
+            let rent_minimum = rent.minimum_balance(0); // Need Rent sysvar!
+             if reserve_out_acc.lamports().saturating_sub(rent_minimum) < amount_out {
+                 return Err(PoolError::InsufficientFunds.into());
+            }
+             invoke_signed(
+                &system_instruction::transfer(pool_state_acc.key, user_dst_acc.key, amount_out),
+                &[pool_state_acc.clone(), user_dst_acc.clone(), system_acc.clone()],
+                &[pool_signer_seeds],
+            )?;
+        } else {
+            let transfer_out_ix = spl_token::instruction::transfer(
+                token_prog_acc.key,
+                reserve_out_acc.key,
+                user_dst_acc.key,
+                pool_state_acc.key,
+                &[],
+                amount_out,
+            )?;
+            invoke_signed(
+                &transfer_out_ix,
+                &[
+                    reserve_out_acc.clone(),
+                    user_dst_acc.clone(),
+                    pool_state_acc.clone(),
+                    token_prog_acc.clone(),
+                ],
+                &[pool_signer_seeds],
+            )?;
+        }
 
         Ok(())
     }

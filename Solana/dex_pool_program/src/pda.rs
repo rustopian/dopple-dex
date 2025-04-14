@@ -2,13 +2,14 @@ use crate::error::PoolError;
 use solana_program::{
     account_info::AccountInfo, bpf_loader, bpf_loader_upgradeable, msg,
     program_error::ProgramError, program_option::COption, program_pack::Pack, pubkey::Pubkey,
-    sysvar::rent::Rent,
+    sysvar::rent::Rent, declare_id, system_program,
 };
 use spl_associated_token_account::get_associated_token_address;
 use spl_token::{
     state::{Account as TokenAccount, AccountState, Mint},
     ID as TOKEN_PROGRAM_ID,
 };
+use crate::NATIVE_MINT;
 
 /// Struct to hold PDA information
 pub struct PdaInfo {
@@ -68,6 +69,17 @@ pub fn get_pool_seeds<'a>(
     ]
 }
 
+/// Get the SOL vault PDA and bump seed for a given pool
+pub fn find_sol_vault_address(
+    pool_pda: &Pubkey,
+    program_id: &Pubkey,
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[SOL_VAULT_PREFIX, pool_pda.as_ref()],
+        program_id,
+    )
+}
+
 /// Checks if an account is rent-exempt.
 /// Kept for use in InitializePool, but generally not called elsewhere.
 pub fn validate_rent_exemption(
@@ -87,9 +99,10 @@ pub fn validate_rent_exemption(
     }
 }
 
-/// Validates a token account intended as a pool vault.
+/// Validates an SPL token account intended as a pool vault.
 /// Checks: ATA derivation, Token Program owner, Initialized, Internal Owner (Pool PDA), Mint.
-pub fn validate_pool_vault(
+/// NO rent check.
+pub fn validate_spl_pool_vault(
     vault_info: &AccountInfo,
     expected_owner_pda: &Pubkey,
     expected_mint: &Pubkey,
@@ -98,7 +111,7 @@ pub fn validate_pool_vault(
     let expected_vault_ata = get_associated_token_address(expected_owner_pda, expected_mint);
     if vault_info.key != &expected_vault_ata {
         msg!(
-            "Vault ATA Error: Expected {}, got {}",
+            "SPL Vault ATA Error: Expected {}, got {}",
             expected_vault_ata,
             vault_info.key
         );
@@ -108,7 +121,7 @@ pub fn validate_pool_vault(
     // --- Check 2: Ownership by Token Program ---
     if vault_info.owner != &TOKEN_PROGRAM_ID {
         msg!(
-            "Vault Error: Account {} owned by {}, expected {}",
+            "SPL Vault Error: Account {} owned by {}, expected {}",
             vault_info.key,
             vault_info.owner,
             TOKEN_PROGRAM_ID
@@ -121,14 +134,14 @@ pub fn validate_pool_vault(
         .map_err(|_| PoolError::UnpackAccountFailed)?;
 
     if token_account_data.state != AccountState::Initialized {
-        msg!("Vault Error: Account {} is not initialized", vault_info.key);
+        msg!("SPL Vault Error: Account {} is not initialized", vault_info.key);
         return Err(PoolError::InvalidAccountData.into());
     }
 
     // --- Check 4: Internal Owner matches Pool PDA ---
     if &token_account_data.owner != expected_owner_pda {
         msg!(
-            "Vault Error: Account {} owner {} does not match expected PDA {}",
+            "SPL Vault Error: Account {} owner {} does not match expected PDA {}",
             vault_info.key,
             token_account_data.owner,
             expected_owner_pda
@@ -139,7 +152,7 @@ pub fn validate_pool_vault(
     // --- Check 5: Mint matches expected mint ---
     if &token_account_data.mint != expected_mint {
         msg!(
-            "Vault Error: Account {} mint {} does not match expected mint {}",
+            "SPL Vault Error: Account {} mint {} does not match expected mint {}",
             vault_info.key,
             token_account_data.mint,
             expected_mint
@@ -150,9 +163,51 @@ pub fn validate_pool_vault(
     Ok(())
 }
 
-/// Validates basic properties of any SPL Token account.
+/// Validates a native SOL account intended as a pool vault.
+/// Checks: Address matches derived PDA, Owned by pool program, Is empty data.
+pub fn validate_sol_pool_vault(
+    vault_info: &AccountInfo,
+    expected_vault_pda: &Pubkey,
+    owner_program_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    // Check Address
+    if vault_info.key != expected_vault_pda {
+        msg!(
+            "SOL Vault PDA Error: Expected {}, got {}",
+            expected_vault_pda,
+            vault_info.key
+        );
+        return Err(PoolError::IncorrectPoolPDA.into()); // Re-use error?
+    }
+
+    // Check Owner
+    if vault_info.owner != owner_program_id {
+        msg!(
+            "SOL Vault Owner Error: Account {} owned by {}, expected {}",
+            vault_info.key,
+            vault_info.owner,
+            owner_program_id
+        );
+        return Err(PoolError::InvalidAccountData.into()); // Use InvalidAccountData
+    }
+
+    // Check Data Length (should be 0 for lamport-holding PDAs)
+    if !vault_info.data_is_empty() {
+        msg!(
+            "SOL Vault Data Error: Account {} has non-zero data length {}",
+            vault_info.key,
+            vault_info.data_len()
+        );
+        return Err(PoolError::InvalidAccountData.into());
+    }
+
+    Ok(())
+}
+
+/// Validates basic properties of an SPL Token account (e.g., user ATA).
 /// Checks: Token Program owner, Initialized, Internal Owner, Mint.
-pub fn validate_token_account_basic(
+/// NO rent check.
+pub fn validate_spl_token_account(
     account_info: &AccountInfo,
     expected_owner: &Pubkey,
     expected_mint: &Pubkey,
@@ -160,7 +215,7 @@ pub fn validate_token_account_basic(
     // Check ownership by Token Program
     if account_info.owner != &TOKEN_PROGRAM_ID {
         msg!(
-            "Token Account Error: Account {} owned by {}, expected {}",
+            "SPL Account Error: Account {} owned by {}, expected {}",
             account_info.key,
             account_info.owner,
             TOKEN_PROGRAM_ID
@@ -174,17 +229,14 @@ pub fn validate_token_account_basic(
 
     // Check if initialized (state check)
     if token_account_data.state != AccountState::Initialized {
-        msg!(
-            "Token Account Error: Account {} is not initialized",
-            account_info.key
-        );
+        msg!("SPL Account Error: Account {} is not initialized", account_info.key);
         return Err(PoolError::InvalidAccountData.into());
     }
 
     // Check owner field inside the token account data
     if &token_account_data.owner != expected_owner {
         msg!(
-            "Token Account Error: Account {} owner {} does not match expected owner {}",
+            "SPL Account Error: Account {} owner {} does not match expected owner {}",
             account_info.key,
             token_account_data.owner,
             expected_owner
@@ -195,7 +247,7 @@ pub fn validate_token_account_basic(
     // Check mint
     if &token_account_data.mint != expected_mint {
         msg!(
-            "Token Account Error: Account {} mint {} does not match expected mint {}",
+            "SPL Account Error: Account {} mint {} does not match expected mint {}",
             account_info.key,
             token_account_data.mint,
             expected_mint
@@ -206,12 +258,62 @@ pub fn validate_token_account_basic(
     Ok(token_account_data)
 }
 
+/// Validates a user's native SOL account.
+/// Checks: Key matches expected, Owned by System Program, Is signer (optional), Is writable (optional).
+pub fn validate_user_sol_account(
+    account_info: &AccountInfo,
+    expected_user_key: &Pubkey,
+    check_signer: bool,
+    check_writable: bool,
+) -> Result<(), ProgramError> {
+    // Check key matches expected user wallet
+    if account_info.key != expected_user_key {
+         msg!(
+            "User SOL Account Error: Expected key {}, got {}",
+            expected_user_key,
+            account_info.key
+        );
+        return Err(PoolError::InvalidArgument.into());
+    }
+
+    // Check ownership by System Program
+    if account_info.owner != &system_program::id() {
+        msg!(
+            "User SOL Account Error: Account {} owned by {}, expected SystemProgram {}",
+            account_info.key,
+            account_info.owner,
+            system_program::id()
+        );
+        return Err(PoolError::InvalidAccountData.into()); // Use InvalidAccountData
+    }
+
+    // Check signer if required (e.g., for transfer FROM)
+    if check_signer && !account_info.is_signer {
+        msg!("User SOL Account Error: Account {} must be signer", account_info.key);
+        return Err(PoolError::MissingRequiredSignature.into());
+    }
+
+    // Check writable if required (e.g., for transfer TO)
+    if check_writable && !account_info.is_writable {
+        msg!("User SOL Account Error: Account {} must be writable", account_info.key);
+         return Err(PoolError::InvalidAccountData.into()); // Need a better error? AccountNotWritable?
+    }
+
+    Ok(())
+}
+
 /// Validates basic properties of an SPL Mint account.
-/// Checks: Token Program owner, Initialized.
+/// Checks: Token Program owner, Initialized OR is NATIVE_MINT.
+/// NO rent check.
 pub fn validate_mint_basic(
     mint_info: &AccountInfo,
-) -> Result<Mint, ProgramError> {
-    // Check ownership by Token Program
+) -> Result<Option<Mint>, ProgramError> { // Return Option<Mint>
+    // Allow Native SOL Mint
+    if mint_info.key == &NATIVE_MINT {
+        return Ok(None); // Indicate it's native mint
+    }
+
+    // Check ownership by Token Program for SPL mints
     if mint_info.owner != &TOKEN_PROGRAM_ID {
         msg!(
             "Mint Error: Account {} owned by {}, expected {}",
@@ -223,8 +325,8 @@ pub fn validate_mint_basic(
     }
 
     // Unpack Mint data
-    let mint_data =
-        Mint::unpack(&mint_info.data.borrow()).map_err(|_| PoolError::UnpackAccountFailed)?;
+    let mint_data = Mint::unpack(&mint_info.data.borrow())
+        .map_err(|_| PoolError::UnpackAccountFailed)?;
 
     // Check if initialized
     if !mint_data.is_initialized {
@@ -232,7 +334,7 @@ pub fn validate_mint_basic(
         return Err(PoolError::InvalidAccountData.into());
     }
 
-    Ok(mint_data)
+    Ok(Some(mint_data)) // Indicate it's an SPL mint
 }
 
 /// Validates properties of an LP Mint account's data (authority, freeze authority).
@@ -313,3 +415,12 @@ pub fn validate_executable(account_info: &AccountInfo) -> Result<(), ProgramErro
 
     Ok(())
 }
+
+// Define the ATA Program ID constant
+pub const ASSOCIATED_TOKEN_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    6, 167, 213, 23, 18, 164, 209, 188, 68, 17, 103, 103, 137, 18, 170, 142,
+    185, 199, 164, 129, 91, 168, 87, 204, 116, 157, 106, 19, 15, 88, 139, 133,
+]); // ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL
+
+/// Seeds for the SOL vault PDA
+pub const SOL_VAULT_PREFIX: &[u8] = b"sol_vault";

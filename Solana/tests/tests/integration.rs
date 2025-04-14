@@ -196,6 +196,7 @@ fn execute_add_liquidity(
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(setup.plugin_pid, false),
             AccountMeta::new(setup.plugin_state_pk, false),
+            AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: PoolInstruction::AddLiquidity { amount_a, amount_b }.try_to_vec()?,
     };
@@ -581,6 +582,8 @@ fn test_remove_liquidity_simple() -> Result<(), Box<dyn Error>> {
             AccountMeta::new_readonly(spl_token::id(), false), // 8 token program
             AccountMeta::new_readonly(setup.plugin_pid, false), // 9 plugin program
             AccountMeta::new(setup.plugin_state_pk, false), // 10 plugin state
+            AccountMeta::new_readonly(system_program::id(), false), // 11 System Program
+            AccountMeta::new_readonly(sysvar::rent::id(), false),   // 12 Rent Sysvar
         ],
         data: PoolInstruction::RemoveLiquidity {
             amount_lp: remove_amount_lp,
@@ -686,6 +689,8 @@ fn test_remove_liquidity_partial() -> Result<(), Box<dyn Error>> {
             AccountMeta::new_readonly(spl_token::id(), false), // 8 token program
             AccountMeta::new_readonly(setup.plugin_pid, false), // 9 plugin program
             AccountMeta::new(setup.plugin_state_pk, false), // 10 plugin state
+            AccountMeta::new_readonly(system_program::id(), false), // 11 System Program
+            AccountMeta::new_readonly(sysvar::rent::id(), false),   // 12 Rent Sysvar
         ],
         data: PoolInstruction::RemoveLiquidity {
             amount_lp: remove_amount_lp,
@@ -884,6 +889,8 @@ fn test_swap_a_to_b() -> Result<(), Box<dyn Error>> {
             AccountMeta::new_readonly(spl_token::id(), false),
             AccountMeta::new_readonly(setup.plugin_pid, false),
             AccountMeta::new(setup.plugin_state_pk, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(sysvar::rent::id(), false),
         ],
         data: PoolInstruction::Swap { amount_in, min_out }.try_to_vec()?,
     };
@@ -1055,6 +1062,8 @@ fn test_swap_b_to_a() -> Result<(), Box<dyn Error>> {
             AccountMeta::new_readonly(spl_token::id(), false), // 6 token program
             AccountMeta::new_readonly(setup.plugin_pid, false), // 7 plugin program
             AccountMeta::new(setup.plugin_state_pk, false), // 8 plugin state - Mark Writable
+            AccountMeta::new_readonly(system_program::id(), false), // 9 ADDED System Program
+            AccountMeta::new_readonly(sysvar::rent::id(), false),   // 10 ADDED Rent Sysvar
         ],
         data: PoolInstruction::Swap { amount_in, min_out }.try_to_vec()?,
     };
@@ -1503,6 +1512,8 @@ fn test_remove_liquidity_zero() -> Result<(), Box<dyn Error>> {
             AccountMeta::new_readonly(spl_token::id(), false), // 8 token program
             AccountMeta::new_readonly(setup.plugin_pid, false), // 9 plugin program
             AccountMeta::new(setup.plugin_state_pk, false), // 10 plugin state
+            AccountMeta::new_readonly(system_program::id(), false), // 11 System Program
+            AccountMeta::new_readonly(sysvar::rent::id(), false),   // 12 Rent Sysvar
         ],
         data: PoolInstruction::RemoveLiquidity {
             amount_lp: remove_amount_lp,
