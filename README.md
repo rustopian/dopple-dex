@@ -6,7 +6,7 @@ Full LiteSVM and Multitest tests are included.
 
 ## Security Matters
 
-Right now, `constant_product_plugin` can be called externally. It should verify that it can only be called by the `dex_pool_program`.
+Right now, `constant_product_plugin` can be called externally. This is okay, since the plugin doesn't actually control any balances; it only replies to requests for mathematical operations. Still, I'd like to analyze this for any potential exploits.
 
 - **Solana:** Contains the implementation for the Solana blockchain. See the [Solana README](./Solana/README.md) for details.
 - **CosmWasm:** Contains the implementation using the CosmWasm framework. See the [CosmWasm README](./CosmWasm/README.md) for details.
