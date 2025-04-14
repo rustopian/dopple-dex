@@ -1,0 +1,38 @@
+[package]
+name = "dex-pool-program"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+solana-program = { workspace = true }
+spl-token = { workspace = true, features = ["no-entrypoint"] }
+borsh = { workspace = true }
+thiserror = { workspace = true }
+constant-product-plugin = { path = "../constant_product_plugin", features = ["no-entrypoint"] }
+spl-associated-token-account = { workspace = true, default-features = false, features = ["no-entrypoint"] }
+
+[dev-dependencies]
+borsh = { workspace = true }
+solana-program-test = { workspace = true }
+solana-sdk = { workspace = true }
+litesvm = { workspace = true }
+spl-memo = { workspace = true, features = ["no-entrypoint"] }
+bincode = { workspace = true }
+
+[lib]
+name = "dex_pool_program"
+crate-type = ["cdylib", "lib"]
+
+# Tell rustc to allow these specific cfgs used by the solana-program entrypoint macro
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(custom_heap)', # Older name, might still be checked
+    'cfg(custom_panic)', # Older name, might still be checked
+]}
+
+[features]
+no-entrypoint = []
+test-bpf = []

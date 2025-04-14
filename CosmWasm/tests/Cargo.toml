@@ -1,0 +1,18 @@
+[package]
+name = "tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cosmwasm-std = { workspace = true }
+dex-factory = { path = "../contracts/dex-factory", features = ["library"] }
+pool-constant-product = { path = "../contracts/pool-constant-product", features = ["library"] }
+schemars = { workspace = true }
+serde = { workspace = true }
+cw20 = { workspace = true }
+cw-utils = { workspace = true }
+cw20-base = { workspace = true }
+
+[dev-dependencies]
+cw-multi-test = { workspace = true }

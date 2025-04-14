@@ -1,0 +1,16 @@
+[package]
+name = "constant-product-plugin"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+borsh = { workspace = true }
+solana-program = { workspace = true }
+spl-math = { workspace = true, features = ["no-entrypoint"] }
+
+[features]
+no-entrypoint = []
+
+[lib]
+name = "constant_product_plugin"
+crate-type = ["cdylib", "lib"]

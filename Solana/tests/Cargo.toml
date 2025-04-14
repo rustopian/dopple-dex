@@ -1,0 +1,23 @@
+[package]
+name = "tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+solana-program-test = { workspace = true }
+solana-sdk = { workspace = true }
+solana-program = { workspace = true }
+spl-token = { workspace = true }
+borsh = { workspace = true }
+dex-pool-program = { path = "../dex_pool_program", features = ["no-entrypoint"] }
+constant-product-plugin = { path = "../constant_product_plugin", features = ["no-entrypoint"] }
+spl-associated-token-account = { workspace = true }
+spl-math = { workspace = true }
+spl-memo = { workspace = true }
+
+[dev-dependencies]
+litesvm = { workspace = true }
+
+[[test]]
+name = "integration" 
+path = "tests/integration.rs"
