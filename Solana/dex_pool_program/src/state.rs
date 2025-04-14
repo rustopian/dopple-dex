@@ -2,6 +2,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use solana_program::pubkey::Pubkey;
 
 /// The main state account for a liquidity pool.
+/// Convenient for retrieving pool information.
 ///
 /// It stores references to:
 /// - Mints for the two assets being pooled and the LP token mint.
