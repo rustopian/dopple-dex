@@ -1,7 +1,6 @@
 use {
     borsh::{BorshDeserialize, BorshSerialize},
     dex_pool_program::instruction::PoolInstruction,
-    // std::path::{Path, PathBuf}, // Removed unused Path, PathBuf
     dex_pool_program::processor::PluginCalcResult,
     dex_pool_program::state::PoolState,
     litesvm::{
@@ -9,22 +8,23 @@ use {
         LiteSVM,
     },
     solana_sdk::{
-        // account::Account, // Removed, covered by Pack
         instruction::{AccountMeta, Instruction},
         message::Message,
-        // Use Pack from the spl_token re-export
-        // program_pack::Pack, // Old import
         pubkey::Pubkey,
         signature::Signer,
         signer::keypair::Keypair,
         system_program,
-        sysvar::{self, rent::Rent}, // Removed unused Sysvar trait
+        sysvar::{self, rent::Rent},
         transaction::Transaction,
+        system_instruction::{SystemInstruction, self}, // Corrected import
     },
-    spl_token::{self, solana_program::program_pack::Pack},
+    spl_associated_token_account,
+    spl_memo,
+    spl_token::{self, solana_program::program_pack::Pack}, // Use Pack from here for spl_token::state::Account
     std::env,
     std::error::Error,
     std::mem::size_of,
+    spl_token::state::{Account as SplAccount, AccountState, Mint}, // Combine state imports
 };
 
 // REMOVED Obsolete TODO comment block
@@ -149,10 +149,18 @@ fn mint_to_ata(
 }
 
 // Helper to get token account balance
-fn get_token_balance(svm: &LiteSVM, ata_pk: &Pubkey) -> u64 {
-    svm.get_account(ata_pk)
-        .map(|acc| spl_token::state::Account::unpack(&acc.data).unwrap().amount)
-        .unwrap_or(0)
+fn get_token_balance(svm: &LiteSVM, account_pk: &Pubkey, mint_pk: &Pubkey) -> u64 {
+    if *mint_pk == spl_token::native_mint::id() {
+        // For native SOL, return lamport balance of the account
+        svm.get_account(account_pk)
+            .map(|acc| acc.lamports)
+            .unwrap_or(0)
+    } else {
+        // For SPL tokens, return token amount from the TokenAccount state
+        svm.get_account(account_pk)
+            .map(|acc| spl_token::state::Account::unpack(&acc.data).unwrap().amount)
+            .unwrap_or(0)
+    }
 }
 
 // NEW HELPER: Setup user and their ATAs
@@ -477,8 +485,8 @@ fn test_add_liquidity_simple() -> Result<(), Box<dyn Error>> {
         &user_ata_b,
         initial_b_amount,
     )?;
-    assert_eq!(get_token_balance(&setup.svm, &user_ata_a), initial_a_amount);
-    assert_eq!(get_token_balance(&setup.svm, &user_ata_b), initial_b_amount);
+    assert_eq!(get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a), initial_a_amount);
+    assert_eq!(get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b), initial_b_amount);
 
     // Add liquidity using helper
     let deposit_a = 123_456;
@@ -495,16 +503,16 @@ fn test_add_liquidity_simple() -> Result<(), Box<dyn Error>> {
 
     // Assert balances
     assert_eq!(
-        get_token_balance(&setup.svm, &user_ata_a),
+        get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a),
         initial_a_amount - deposit_a
     );
     assert_eq!(
-        get_token_balance(&setup.svm, &user_ata_b),
+        get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b),
         initial_b_amount - deposit_b
     );
-    assert_eq!(get_token_balance(&setup.svm, &setup.vault_a_pk), deposit_a);
-    assert_eq!(get_token_balance(&setup.svm, &setup.vault_b_pk), deposit_b);
-    let user_lp_balance = get_token_balance(&setup.svm, &user_ata_lp);
+    assert_eq!(get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a), deposit_a);
+    assert_eq!(get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b), deposit_b);
+    let user_lp_balance = get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint);
     println!("User received {} LP tokens", user_lp_balance);
     assert!(user_lp_balance > 0, "User should receive LP tokens");
 
@@ -559,11 +567,11 @@ fn test_remove_liquidity_simple() -> Result<(), Box<dyn Error>> {
         deposit_b,
     )?;
 
-    let initial_lp_balance = get_token_balance(&setup.svm, &user_ata_lp);
-    let initial_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let initial_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk);
-    let initial_user_a = get_token_balance(&setup.svm, &user_ata_a);
-    let initial_user_b = get_token_balance(&setup.svm, &user_ata_b);
+    let initial_lp_balance = get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint);
+    let initial_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let initial_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
+    let initial_user_a = get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a);
+    let initial_user_b = get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b);
     assert!(initial_lp_balance > 0);
 
     // Remove all LP
@@ -594,17 +602,17 @@ fn test_remove_liquidity_simple() -> Result<(), Box<dyn Error>> {
     let remove_tx = Transaction::new_signed_with_payer(
         &[remove_liq_ix],
         Some(&setup.payer.pubkey()),
-        &[&setup.payer, &user_kp], // Payer + User must sign
+        &[&setup.payer, &user_kp],
         setup.svm.latest_blockhash(),
     );
     map_litesvm_err(setup.svm.send_transaction(remove_tx))?;
 
     // Assert balances
-    assert_eq!(get_token_balance(&setup.svm, &user_ata_lp), 0);
-    assert_eq!(get_token_balance(&setup.svm, &setup.vault_a_pk), 0);
-    assert_eq!(get_token_balance(&setup.svm, &setup.vault_b_pk), 0);
-    let final_user_a = get_token_balance(&setup.svm, &user_ata_a);
-    let final_user_b = get_token_balance(&setup.svm, &user_ata_b);
+    assert_eq!(get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint), 0);
+    assert_eq!(get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a), 0);
+    assert_eq!(get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b), 0);
+    let final_user_a = get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a);
+    let final_user_b = get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b);
     println!(
         "User received A: {}, B: {}",
         final_user_a - initial_user_a,
@@ -660,11 +668,11 @@ fn test_remove_liquidity_partial() -> Result<(), Box<dyn Error>> {
         deposit_b,
     )?;
 
-    let lp_balance_after_add = get_token_balance(&setup.svm, &user_ata_lp);
-    let vault_a_after_add = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let vault_b_after_add = get_token_balance(&setup.svm, &setup.vault_b_pk);
-    let user_a_after_add = get_token_balance(&setup.svm, &user_ata_a);
-    let user_b_after_add = get_token_balance(&setup.svm, &user_ata_b);
+    let lp_balance_after_add = get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint);
+    let vault_a_after_add = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let vault_b_after_add = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
+    let user_a_after_add = get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a);
+    let user_b_after_add = get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b);
     let pool_state_after_add = get_pool_state(&setup.svm, &setup.pool_pda)?;
     let total_lp_after_add = pool_state_after_add.total_lp_supply;
     println!(
@@ -701,17 +709,17 @@ fn test_remove_liquidity_partial() -> Result<(), Box<dyn Error>> {
     let remove_tx = Transaction::new_signed_with_payer(
         &[remove_liq_ix],
         Some(&setup.payer.pubkey()),
-        &[&setup.payer, &user_kp], // Payer + User must sign
+        &[&setup.payer, &user_kp],
         setup.svm.latest_blockhash(),
     );
     map_litesvm_err(setup.svm.send_transaction(remove_tx))?;
 
     // Assert balances
-    let final_user_lp = get_token_balance(&setup.svm, &user_ata_lp);
-    let final_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let final_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk);
-    let final_user_a = get_token_balance(&setup.svm, &user_ata_a);
-    let final_user_b = get_token_balance(&setup.svm, &user_ata_b);
+    let final_user_lp = get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint);
+    let final_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let final_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
+    let final_user_a = get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a);
+    let final_user_b = get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b);
     assert_eq!(final_user_lp, lp_balance_after_add - remove_amount_lp);
     let received_a = final_user_a - user_a_after_add;
     let received_b = final_user_b - user_b_after_add;
@@ -868,10 +876,10 @@ fn test_swap_a_to_b() -> Result<(), Box<dyn Error>> {
         initial_swapper_b,
     )?;
 
-    let initial_user_a = get_token_balance(&setup.svm, &swapper_ata_a);
-    let initial_user_b = get_token_balance(&setup.svm, &swapper_ata_b);
-    let initial_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let initial_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk);
+    let initial_user_a = get_token_balance(&setup.svm, &swapper_ata_a, &setup.mint_a);
+    let initial_user_b = get_token_balance(&setup.svm, &swapper_ata_b, &setup.mint_b);
+    let initial_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let initial_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
 
     // Build Swap IX (A -> B)
     let amount_in = 11_111;
@@ -905,10 +913,10 @@ fn test_swap_a_to_b() -> Result<(), Box<dyn Error>> {
     map_litesvm_err(setup.svm.send_transaction(swap_tx))?;
 
     // Assert balances
-    let final_user_a = get_token_balance(&setup.svm, &swapper_ata_a);
-    let final_user_b = get_token_balance(&setup.svm, &swapper_ata_b);
-    let final_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let final_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk);
+    let final_user_a = get_token_balance(&setup.svm, &swapper_ata_a, &setup.mint_a);
+    let final_user_b = get_token_balance(&setup.svm, &swapper_ata_b, &setup.mint_b);
+    let final_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let final_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
 
     // Calculate expected output (simple CPMM with 0.3% fee)
     // amount_out = (reserve_b * effective_in) / (reserve_a + effective_in)
@@ -1041,10 +1049,10 @@ fn test_swap_b_to_a() -> Result<(), Box<dyn Error>> {
         initial_swapper_b,
     )?;
 
-    let initial_user_a = get_token_balance(&setup.svm, &swapper_ata_a);
-    let initial_user_b = get_token_balance(&setup.svm, &swapper_ata_b);
-    let initial_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let initial_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk);
+    let initial_user_a = get_token_balance(&setup.svm, &swapper_ata_a, &setup.mint_a);
+    let initial_user_b = get_token_balance(&setup.svm, &swapper_ata_b, &setup.mint_b);
+    let initial_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let initial_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
 
     // Build Swap IX (B -> A)
     let amount_in = 22_222;
@@ -1078,10 +1086,10 @@ fn test_swap_b_to_a() -> Result<(), Box<dyn Error>> {
     map_litesvm_err(setup.svm.send_transaction(swap_tx))?;
 
     // Assert balances
-    let final_user_a = get_token_balance(&setup.svm, &swapper_ata_a);
-    let final_user_b = get_token_balance(&setup.svm, &swapper_ata_b);
-    let final_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let final_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk);
+    let final_user_a = get_token_balance(&setup.svm, &swapper_ata_a, &setup.mint_a);
+    let final_user_b = get_token_balance(&setup.svm, &swapper_ata_b, &setup.mint_b);
+    let final_vault_a = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let final_vault_b = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
 
     // Calculate expected output (simple CPMM with 0.3% fee)
     // amount_out_a = (reserve_a * effective_in_b) / (reserve_b + effective_in_b)
@@ -1214,13 +1222,13 @@ fn test_add_liquidity_refund() -> Result<(), Box<dyn Error>> {
         user_initial_b,
     )?;
 
-    let user_balance_a_before = get_token_balance(&setup.svm, &user_ata_a);
-    let user_balance_b_before = get_token_balance(&setup.svm, &user_ata_b);
-    let vault_a_before = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let vault_b_before = get_token_balance(&setup.svm, &setup.vault_b_pk);
+    let user_balance_a_before = get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a);
+    let user_balance_b_before = get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b);
+    let vault_a_before = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let vault_b_before = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
     let pool_state_before = get_pool_state(&setup.svm, &setup.pool_pda)?;
     let total_lp_before = pool_state_before.total_lp_supply;
-    let user_lp_before = get_token_balance(&setup.svm, &user_ata_lp);
+    let user_lp_before = get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint);
 
     // User tries to deposit 30k A (excess) and 50k B.
     let deposit_a_attempt = 30_000;
@@ -1237,11 +1245,11 @@ fn test_add_liquidity_refund() -> Result<(), Box<dyn Error>> {
     )?;
 
     // --- Assertions ---
-    let user_balance_a_after = get_token_balance(&setup.svm, &user_ata_a);
-    let user_balance_b_after = get_token_balance(&setup.svm, &user_ata_b);
-    let vault_a_after = get_token_balance(&setup.svm, &setup.vault_a_pk);
-    let vault_b_after = get_token_balance(&setup.svm, &setup.vault_b_pk);
-    let user_lp_after = get_token_balance(&setup.svm, &user_ata_lp);
+    let user_balance_a_after = get_token_balance(&setup.svm, &user_ata_a, &setup.mint_a);
+    let user_balance_b_after = get_token_balance(&setup.svm, &user_ata_b, &setup.mint_b);
+    let vault_a_after = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let vault_b_after = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
+    let user_lp_after = get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint);
     let pool_state_after = get_pool_state(&setup.svm, &setup.pool_pda)?;
     let total_lp_after = pool_state_after.total_lp_supply;
 
@@ -1494,7 +1502,7 @@ fn test_remove_liquidity_zero() -> Result<(), Box<dyn Error>> {
         deposit_a,
         deposit_b,
     )?;
-    assert!(get_token_balance(&setup.svm, &user_ata_lp) > 0);
+    assert!(get_token_balance(&setup.svm, &user_ata_lp, &setup.lp_mint) > 0);
 
     // Attempt to remove 0 LP
     let remove_amount_lp = 0;
@@ -1534,3 +1542,285 @@ fn test_remove_liquidity_zero() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+
+// NEW HELPER: Setup for SOL/SPL pool
+fn setup_pool_environment_mixed(sol_is_a: bool) -> Result<TestSetup, Box<dyn Error>> {
+    // --- Boilerplate Setup ---
+    let dex_pid = Pubkey::new_unique();
+    let plugin_pid = Pubkey::new_unique();
+    println!(
+        "Using DEX Program ID: {} (SOL={})",
+        dex_pid,
+        if sol_is_a { "A" } else { "B" }
+    );
+    println!("Using Plugin Program ID: {}", plugin_pid);
+    let current_dir = env::current_dir()?;
+    let workspace_root = current_dir.parent().unwrap();
+    let dex_so_path = workspace_root.join("target").join("deploy").join("dex_pool_program.so");
+    let plugin_so_path = workspace_root.join("target").join("deploy").join("constant_product_plugin.so");
+    let mut svm = LiteSVM::new();
+    map_litesvm_err(svm.add_program_from_file(dex_pid, &dex_so_path))?;
+    map_litesvm_err(svm.add_program_from_file(plugin_pid, &plugin_so_path))?;
+    let payer = Keypair::new();
+    let mint_authority = Keypair::new();
+    map_litesvm_err(svm.airdrop(&payer.pubkey(), 10_000_000_000))?;
+    map_litesvm_err(svm.airdrop(&mint_authority.pubkey(), 1_000_000_000))?;
+
+    // --- Mint Setup (Conditional) ---
+    let mint_sol = spl_token::native_mint::id();
+    let mint_spl_kp = create_mint(&mut svm, &payer, &mint_authority.pubkey())?;
+    let mint_spl = mint_spl_kp.pubkey();
+    let lp_mint_kp = create_mint(&mut svm, &payer, &mint_authority.pubkey())?; // LP is always SPL
+    let lp_mint = lp_mint_kp.pubkey();
+
+    let (mint_a, mint_b) = if sol_is_a {
+        (mint_sol, mint_spl)
+    } else {
+        (mint_spl, mint_sol)
+    };
+
+    // --- Plugin State ---
+    let plugin_state_kp = Keypair::new();
+    let plugin_state_pk = plugin_state_kp.pubkey();
+    let plugin_state_size = size_of::<PluginCalcResult>();
+    let rent = svm.get_sysvar::<Rent>();
+    let plugin_state_rent = rent.minimum_balance(plugin_state_size);
+    let create_plugin_state_ix = solana_sdk::system_instruction::create_account(
+        &payer.pubkey(), &plugin_state_pk, plugin_state_rent, plugin_state_size as u64, &plugin_pid);
+    let tx_plugin_state = Transaction::new_signed_with_payer(
+        &[create_plugin_state_ix], Some(&payer.pubkey()), &[&payer, &plugin_state_kp], svm.latest_blockhash());
+    map_litesvm_err(svm.send_transaction(tx_plugin_state))?;
+
+    // --- PDA Derivation ---
+    let (sorted_mint_a, sorted_mint_b) = if mint_a < mint_b { (mint_a, mint_b) } else { (mint_b, mint_a) };
+    let (pool_pda, pool_bump) = Pubkey::find_program_address(
+        &[b"pool", sorted_mint_a.as_ref(), sorted_mint_b.as_ref(), plugin_pid.as_ref(), plugin_state_pk.as_ref()],
+        &dex_pid);
+    println!("Derived Pool PDA: {}, Bump: {}", pool_pda, pool_bump);
+
+    // Derive potential vault addresses
+    let (sol_vault_pda, _sol_vault_bump) = Pubkey::find_program_address(&[b"sol_vault", pool_pda.as_ref()], &dex_pid); // Derive SOL vault PDA
+    let spl_vault_ata = spl_associated_token_account::get_associated_token_address(&pool_pda, &mint_spl);
+    let (vault_a_pk, vault_b_pk) = if sol_is_a {
+        (sol_vault_pda, spl_vault_ata)
+    } else {
+        (spl_vault_ata, sol_vault_pda)
+    };
+    println!("Derived Vault A ({}): {}", if sol_is_a {"SOL"} else {"SPL"}, vault_a_pk);
+    println!("Derived Vault B ({}): {}", if sol_is_a {"SPL"} else {"SOL"}, vault_b_pk);
+
+    // --- Pre-create ONLY SPL Vault ATA & Set LP Authority ---
+    let setup_instructions = vec![
+        spl_associated_token_account::instruction::create_associated_token_account(
+            &payer.pubkey(), &pool_pda, &mint_spl, &spl_token::id()),
+        spl_token::instruction::set_authority(
+            &spl_token::id(), &lp_mint, Some(&pool_pda), spl_token::instruction::AuthorityType::MintTokens,
+            &mint_authority.pubkey(), &[&mint_authority.pubkey()])?
+    ];
+    let setup_tx = Transaction::new_signed_with_payer(
+        &setup_instructions, Some(&payer.pubkey()), &[&payer, &mint_authority], svm.latest_blockhash());
+    map_litesvm_err(svm.send_transaction(setup_tx))?;
+    println!("Pre-Init SPL ATA/LP Auth Setup successful.");
+
+
+    // --- Initialize the Pool --- 
+    let mut init_accounts = vec![ // Declare mutable
+        AccountMeta::new(payer.pubkey(), true),             // 0 Payer
+        AccountMeta::new(pool_pda, false),                  // 1 Pool State (will be created)
+        AccountMeta::new(vault_a_pk, false),                // 2 Vault A (pass actual derived key, NOT signer, writable=true)
+        AccountMeta::new(vault_b_pk, false),                // 3 Vault B (pass actual derived key, NOT signer, writable=true)
+        AccountMeta::new(lp_mint, false),                   // 4 LP Mint (writable=false OK for init)
+        AccountMeta::new_readonly(mint_a, false),           // 5 Mint A (SOL or SPL)
+        AccountMeta::new_readonly(mint_b, false),           // 6 Mint B (SOL or SPL)
+        AccountMeta::new_readonly(plugin_pid, false),       // 7 Plugin Program
+        AccountMeta::new(plugin_state_pk, false),           // 8 Plugin State (writable=false OK for init)
+        AccountMeta::new_readonly(system_program::id(), false), // 9 System Program
+        AccountMeta::new_readonly(sysvar::rent::id(), false),   // 10 Rent Sysvar
+        AccountMeta::new_readonly(spl_token::id(), false),      // 11 Token Program
+    ];
+
+    // Adjust writability after definition for clarity (needed for SOL vault creation by program)
+    if let Some(vault_a_meta) = init_accounts.get_mut(2) {
+        vault_a_meta.is_writable = true;
+    }
+    if let Some(vault_b_meta) = init_accounts.get_mut(3) {
+       vault_b_meta.is_writable = true;
+    }
+     if let Some(lp_mint_meta) = init_accounts.get_mut(4) {
+       lp_mint_meta.is_writable = true; // LP mint needs to be writable for set_authority
+    }
+     if let Some(plugin_state_meta) = init_accounts.get_mut(8) {
+        plugin_state_meta.is_writable = true; // Plugin state needs to be writable by plugin
+    }
+     if let Some(pool_pda_meta) = init_accounts.get_mut(1) {
+        pool_pda_meta.is_writable = true; // Pool state is created
+    }
+
+
+    // --- Diagnostic log for the final account list ---
+    println!("Final InitializePool Accounts:");
+    for (i, acc) in init_accounts.iter().enumerate() {
+        println!("  {}: {} (signer: {}, writable: {})", i, acc.pubkey, acc.is_signer, acc.is_writable);
+    }
+
+    let init_ix = Instruction {
+        program_id: dex_pid,
+        accounts: init_accounts,
+        data: PoolInstruction::InitializePool.try_to_vec()?,
+    };
+    let latest_blockhash = svm.latest_blockhash();
+    let message = Message::new(&[init_ix], Some(&payer.pubkey()));
+    let mut tx = Transaction::new_unsigned(message); // Create unsigned
+    tx.sign(&[&payer], latest_blockhash); // Sign
+    map_litesvm_err(svm.send_transaction(tx))?;
+    println!("Mixed Pool Initialization successful.");
+
+    Ok(TestSetup {
+        svm, payer, mint_authority, dex_pid, plugin_pid,
+        mint_a, mint_b, lp_mint, plugin_state_pk, pool_pda, pool_bump,
+        vault_a_pk, vault_b_pk, // Store the actual vault addresses
+    })
+}
+
+// NEW HELPER: Setup user accounts for SOL/SPL pool
+fn setup_user_accounts_mixed(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    mint_spl: &Pubkey, // The non-SOL mint
+    mint_lp: &Pubkey,
+) -> Result<(Keypair, Pubkey, Pubkey), Box<dyn Error>> {
+    let user_kp = Keypair::new();
+    let user_pk = user_kp.pubkey();
+    map_litesvm_err(svm.airdrop(&user_pk, 10_000_000_000))?; // Airdrop SOL
+    let user_spl_ata = create_user_ata(svm, payer, &user_pk, mint_spl)?; // Create ATA for SPL token
+    let user_lp_ata = create_user_ata(svm, payer, &user_pk, mint_lp)?; // Create ATA for LP token
+    Ok((user_kp, user_spl_ata, user_lp_ata))
+}
+
+// NEW HELPER: Add liquidity to SOL/SPL pool
+fn execute_add_liquidity_mixed(
+    setup: &mut TestSetup,
+    sol_is_a: bool,
+    user_kp: &Keypair,
+    user_spl_ata: &Pubkey, // User's ATA for the SPL token
+    user_lp_ata: &Pubkey,
+    amount_sol: u64,
+    amount_spl: u64,
+) -> Result<(), Box<dyn Error>> {
+    let user_pk = user_kp.pubkey();
+    let (user_acc_a, user_acc_b, amount_a, amount_b) = if sol_is_a {
+        (user_pk, *user_spl_ata, amount_sol, amount_spl) // User wallet is acc A
+    } else {
+        (*user_spl_ata, user_pk, amount_spl, amount_sol) // User wallet is acc B
+    };
+
+    let add_liq_ix = Instruction {
+        program_id: setup.dex_pid,
+        accounts: vec![
+            AccountMeta::new(user_pk, true), // User signer
+            AccountMeta::new(setup.pool_pda, false),
+            AccountMeta::new(setup.vault_a_pk, false), // Vault A (SOL or SPL)
+            AccountMeta::new(setup.vault_b_pk, false), // Vault B (SOL or SPL)
+            AccountMeta::new(setup.lp_mint, false),
+            AccountMeta::new(user_acc_a, false),     // User account A (Wallet or ATA)
+            AccountMeta::new(user_acc_b, false),     // User account B (Wallet or ATA)
+            AccountMeta::new(*user_lp_ata, false),   // User LP ATA
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(setup.plugin_pid, false),
+            AccountMeta::new(setup.plugin_state_pk, false),
+            AccountMeta::new_readonly(system_program::id(), false), // System Program
+        ],
+        data: PoolInstruction::AddLiquidity { amount_a, amount_b }.try_to_vec()?,
+    };
+    let tx = Transaction::new_signed_with_payer(
+        &[add_liq_ix], Some(&setup.payer.pubkey()), &[&setup.payer, user_kp], setup.svm.latest_blockhash());
+    map_litesvm_err(setup.svm.send_transaction(tx))?;
+    Ok(())
+}
+
+// Test Pool Initialization (using the setup function)
+// ... existing tests ...
+
+// --- NEW SOL TESTS --- 
+
+#[test]
+fn test_initialize_pool_sol_spl() -> Result<(), Box<dyn Error>> {
+    // Test with SOL as Token A
+    let setup_sol_a = setup_pool_environment_mixed(true)?;
+    let pool_state_a = get_pool_state(&setup_sol_a.svm, &setup_sol_a.pool_pda)?;
+    assert_eq!(pool_state_a.token_mint_a, spl_token::native_mint::id());
+    assert_eq!(pool_state_a.token_mint_b, setup_sol_a.mint_b); // Should be the SPL mint
+    assert_eq!(pool_state_a.vault_a, setup_sol_a.vault_a_pk); // Should be SOL vault PDA
+    assert_eq!(pool_state_a.vault_b, setup_sol_a.vault_b_pk); // Should be SPL vault ATA
+    assert!(setup_sol_a.svm.get_account(&pool_state_a.vault_a).is_some(), "SOL Vault A not created");
+    println!("SOL=A Pool Initialization checks passed.");
+
+    // Test with SOL as Token B
+    let setup_sol_b = setup_pool_environment_mixed(false)?;
+    let pool_state_b = get_pool_state(&setup_sol_b.svm, &setup_sol_b.pool_pda)?;
+    assert_eq!(pool_state_b.token_mint_a, setup_sol_b.mint_a); // Should be the SPL mint
+    assert_eq!(pool_state_b.token_mint_b, spl_token::native_mint::id());
+    assert_eq!(pool_state_b.vault_a, setup_sol_b.vault_a_pk); // Should be SPL vault ATA
+    assert_eq!(pool_state_b.vault_b, setup_sol_b.vault_b_pk); // Should be SOL vault PDA
+    assert!(setup_sol_b.svm.get_account(&pool_state_b.vault_b).is_some(), "SOL Vault B not created");
+    println!("SOL=B Pool Initialization checks passed.");
+
+    Ok(())
+}
+
+#[test]
+fn test_add_liquidity_sol_spl() -> Result<(), Box<dyn Error>> {
+    let sol_is_a = true;
+    let mut setup = setup_pool_environment_mixed(sol_is_a)?;
+    let mint_spl = if sol_is_a { setup.mint_b } else { setup.mint_a };
+
+    // Setup user
+    let (user_kp, user_spl_ata, user_lp_ata) = setup_user_accounts_mixed(
+        &mut setup.svm, &setup.payer, &mint_spl, &setup.lp_mint)?;
+    let user_pk = user_kp.pubkey();
+
+    // Mint SPL token to user
+    let initial_spl_amount = 7_654_321;
+    mint_to_ata(&mut setup.svm, &setup.payer, &setup.mint_authority, &mint_spl, &user_spl_ata, initial_spl_amount)?;
+
+    let initial_sol_balance = get_token_balance(&setup.svm, &user_pk, &setup.mint_a); // SOL is mint_a
+    let initial_spl_balance = get_token_balance(&setup.svm, &user_spl_ata, &mint_spl); // Use mint_spl
+    let initial_vault_a_balance = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a); // Get initial vault A (SOL)
+    let initial_vault_b_balance = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b); // Get initial vault B (SPL)
+
+    // Add liquidity
+    let deposit_sol = 1_000_000_000; // 1 SOL
+    let deposit_spl = 500_000;
+    execute_add_liquidity_mixed(&mut setup, sol_is_a, &user_kp, &user_spl_ata, &user_lp_ata, deposit_sol, deposit_spl)?;
+
+    // Assert Balances (using get_token_balance which handles SOL/SPL)
+    let final_sol_balance = get_token_balance(&setup.svm, &user_pk, &setup.mint_a); // SOL is mint_a
+    let final_spl_balance = get_token_balance(&setup.svm, &user_spl_ata, &mint_spl); // Use mint_spl
+    let vault_a_balance = get_token_balance(&setup.svm, &setup.vault_a_pk, &setup.mint_a);
+    let vault_b_balance = get_token_balance(&setup.svm, &setup.vault_b_pk, &setup.mint_b);
+    let user_lp_balance = get_token_balance(&setup.svm, &user_lp_ata, &setup.lp_mint);
+
+    println!("User Initial SOL: {}", initial_sol_balance);
+    println!("User Final SOL: {}", final_sol_balance);
+    println!("User Initial SPL: {}", initial_spl_balance);
+    println!("User Final SPL: {}", final_spl_balance);
+    println!("Vault A (SOL) Balance: {}", vault_a_balance);
+    println!("Vault B (SPL) Balance: {}", vault_b_balance);
+    println!("User LP Balance: {}", user_lp_balance);
+
+    // Note: Exact SOL balance check needs to account for potential transaction fees paid by user
+    // For simplicity, we check less than initial, but a better check would estimate fees.
+    assert!(final_sol_balance <= initial_sol_balance - deposit_sol, "User SOL balance incorrect");
+    assert_eq!(final_spl_balance, initial_spl_balance - deposit_spl, "User SPL balance incorrect");
+    assert_eq!(vault_a_balance, initial_vault_a_balance + deposit_sol, "Vault A (SOL) balance incorrect"); // Adjusted assertion
+    assert_eq!(vault_b_balance, initial_vault_b_balance + deposit_spl, "Vault B (SPL) balance incorrect"); // Use initial vault B balance
+    assert!(user_lp_balance > 0, "User should receive LP tokens");
+
+    let pool_state = get_pool_state(&setup.svm, &setup.pool_pda)?;
+    assert_eq!(pool_state.total_lp_supply, user_lp_balance, "Pool total LP supply mismatch");
+
+    println!("Add Liquidity SOL/SPL Test Passed!");
+    Ok(())
+}
+
+// Placeholder for other SOL tests (remove, swap)

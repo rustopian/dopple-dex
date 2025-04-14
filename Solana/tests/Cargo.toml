@@ -14,6 +14,7 @@ constant-product-plugin = { path = "../constant_product_plugin", features = ["no
 spl-associated-token-account = { workspace = true }
 spl-math = { workspace = true }
 spl-memo = { workspace = true }
+bincode = { workspace = true }
 
 [dev-dependencies]
 litesvm = { workspace = true }

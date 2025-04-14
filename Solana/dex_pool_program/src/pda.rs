@@ -177,10 +177,10 @@ pub fn validate_sol_pool_vault(
             expected_vault_pda,
             vault_info.key
         );
-        return Err(PoolError::IncorrectPoolPDA.into()); // Re-use error?
+        return Err(PoolError::IncorrectPoolPDA.into());
     }
 
-    // Check Owner
+    // Check Owner is the Pool Program
     if vault_info.owner != owner_program_id {
         msg!(
             "SOL Vault Owner Error: Account {} owned by {}, expected {}",
@@ -188,7 +188,7 @@ pub fn validate_sol_pool_vault(
             vault_info.owner,
             owner_program_id
         );
-        return Err(PoolError::InvalidAccountData.into()); // Use InvalidAccountData
+        return Err(PoolError::InvalidVaultOwner.into());
     }
 
     // Check Data Length (should be 0 for lamport-holding PDAs)

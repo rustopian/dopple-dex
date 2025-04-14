@@ -82,16 +82,16 @@ impl Processor {
         let acc_iter = &mut accounts.iter();
         let payer_acc = next_account_info(acc_iter)?; // 0
         let pool_state_acc = next_account_info(acc_iter)?; // 1
-        let vault_a_maybe = next_account_info(acc_iter).ok(); // 2? Optional
-        let vault_b_maybe = next_account_info(acc_iter).ok(); // 3? Optional
-        let lp_mint_acc = next_account_info(acc_iter)?; // 4 (or 2/3 if A/B native)
-        let mint_a_acc = next_account_info(acc_iter)?; // 5 (or 3/4)
-        let mint_b_acc = next_account_info(acc_iter)?; // 6 (or 4/5)
-        let plugin_prog_acc = next_account_info(acc_iter)?; // 7 (or 5/6)
-        let plugin_state_acc = next_account_info(acc_iter)?; // 8 (or 6/7)
-        let system_acc = next_account_info(acc_iter)?; // 9 (or 7/8)
-        let rent_acc = next_account_info(acc_iter)?; // 10 (or 8/9)
-        let token_prog_acc = next_account_info(acc_iter)?; // 11 (or 9/10)
+        let vault_a_acc = next_account_info(acc_iter)?; // 2 (Always passed)
+        let vault_b_acc = next_account_info(acc_iter)?; // 3 (Always passed)
+        let lp_mint_acc = next_account_info(acc_iter)?; // 4 
+        let mint_a_acc = next_account_info(acc_iter)?; // 5 
+        let mint_b_acc = next_account_info(acc_iter)?; // 6 
+        let plugin_prog_acc = next_account_info(acc_iter)?; // 7 
+        let plugin_state_acc = next_account_info(acc_iter)?; // 8 
+        let system_acc = next_account_info(acc_iter)?; // 9 
+        let rent_acc = next_account_info(acc_iter)?; // 10 
+        let token_prog_acc = next_account_info(acc_iter)?; // 11 
 
         // --- Initial Validations ---
         msg!("Pool Init: Validating accounts...");
@@ -165,8 +165,8 @@ impl Processor {
             return Err(PoolError::IncorrectPoolPDA.into());
         }
 
-        // --- LP Mint, Vault Account Derivation/Validation/Creation ---
-        msg!("Pool Init: Validating/Creating Vaults & LP Mint...");
+        // --- LP Mint & Vault Account Validation ---
+        msg!("Pool Init: Validating Vaults & LP Mint...");
         // LP Mint (Always SPL)
         let lp_mint_data_option = validate_mint_basic(lp_mint_acc)?;
         let lp_mint_data = lp_mint_data_option.ok_or(PoolError::InvalidMint)?;
@@ -174,8 +174,85 @@ impl Processor {
         validate_lp_mint_zero_supply(&lp_mint_data)?;
         validate_rent_exemption(lp_mint_acc, &rent)?;
 
-        let mut vault_a_address: Pubkey;
-        let mut vault_b_address: Pubkey;
+        // Vault A Validation & Creation
+        if mint_a_is_native {
+            let (expected_sol_vault_pda, sol_vault_a_bump) = find_sol_vault_address(&expected_pool_pda, program_id);
+            // Ensure the account passed matches the derived address
+            if vault_a_acc.key != &expected_sol_vault_pda {
+                msg!("Invalid SOL Vault A account key provided. Expected {}, got {}",
+                    expected_sol_vault_pda, vault_a_acc.key);
+                return Err(PoolError::IncorrectPoolPDA.into());
+            }
+            // Now create it using invoke_signed
+            msg!("Creating SOL Vault A PDA: {}", expected_sol_vault_pda);
+            let sol_vault_a_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_a_bump]];
+            invoke_signed(
+                &system_instruction::create_account(
+                    payer_acc.key,
+                    &expected_sol_vault_pda,
+                    rent.minimum_balance(0),
+                    0,
+                    program_id,
+                ),
+                // Accounts: Payer, New Account (Info passed from client), System Program
+                &[payer_acc.clone(), vault_a_acc.clone(), system_acc.clone()],
+                &[sol_vault_a_signer_seeds],
+            )?;
+            // Validate the created account's owner and data (optional, but good practice)
+            validate_sol_pool_vault(vault_a_acc, &expected_sol_vault_pda, program_id)?;
+        } else {
+            validate_spl_pool_vault(vault_a_acc, &expected_pool_pda, mint_a_acc.key)?;
+        }
+
+        // Vault B Validation & Creation
+        if mint_b_is_native {
+            let (expected_sol_vault_pda, sol_vault_b_bump) = find_sol_vault_address(&expected_pool_pda, program_id);
+            // Ensure the account passed matches the derived address
+             if vault_b_acc.key != &expected_sol_vault_pda {
+                msg!("Invalid SOL Vault B account key provided. Expected {}, got {}",
+                    expected_sol_vault_pda, vault_b_acc.key);
+                return Err(PoolError::IncorrectPoolPDA.into());
+            }
+            // Now create it using invoke_signed
+            msg!("Creating SOL Vault B PDA: {}", expected_sol_vault_pda);
+            let sol_vault_b_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_b_bump]];
+            invoke_signed(
+                &system_instruction::create_account(
+                    payer_acc.key,
+                    &expected_sol_vault_pda,
+                    rent.minimum_balance(0),
+                    0,
+                    program_id,
+                ),
+                 // Accounts: Payer, New Account (Info passed from client), System Program
+                &[payer_acc.clone(), vault_b_acc.clone(), system_acc.clone()],
+                &[sol_vault_b_signer_seeds],
+            )?;
+             // Validate the created account's owner and data (optional, but good practice)
+            validate_sol_pool_vault(vault_b_acc, &expected_sol_vault_pda, program_id)?;
+        } else {
+            validate_spl_pool_vault(vault_b_acc, &expected_pool_pda, mint_b_acc.key)?;
+        }
+
+        msg!("Pool Init: Vaults validated/created.");
+
+        // --- Pool State Account Creation & State Initialization ---
+        msg!("Pool Init: Creating Pool State Account...");
+
+        // Calculate PoolState size
+        let pool_state_size = borsh::to_vec(&PoolState {
+            token_mint_a: *mint_a_acc.key,
+            token_mint_b: *mint_b_acc.key,
+            vault_a: *vault_a_acc.key,
+            vault_b: *vault_b_acc.key,
+            lp_mint: *lp_mint_acc.key,
+            total_lp_supply: 0,
+            bump,
+            plugin_program_id: *plugin_prog_acc.key,
+            plugin_state_pubkey: *plugin_state_acc.key,
+        })?.len();
+        let needed_lamports = rent.minimum_balance(pool_state_size);
+
         let pool_pda_signer_seeds = &[
             b"pool",
             sort_mint_a.as_ref(),
@@ -185,85 +262,32 @@ impl Processor {
             &[bump],
         ];
 
-        // Vault A
-        if mint_a_is_native {
-            let (sol_vault_a_pda, sol_vault_a_bump) = find_sol_vault_address(&expected_pool_pda, program_id);
-            vault_a_address = sol_vault_a_pda;
-            msg!("Creating SOL Vault A PDA: {}", sol_vault_a_pda);
-            let sol_vault_a_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_a_bump]];
-            invoke_signed(
-                &system_instruction::create_account(
-                    payer_acc.key,
-                    &sol_vault_a_pda,
-                    rent.minimum_balance(0),
-                    0, // space
-                    program_id, // owner
-                ),
-                &[payer_acc.clone(), system_acc.clone(), pool_state_acc.clone()],
-                &[sol_vault_a_signer_seeds],
-            )?;
-        } else {
-            let vault_a_acc = vault_a_maybe.ok_or(ProgramError::NotEnoughAccountKeys)?;
-            validate_spl_pool_vault(vault_a_acc, &expected_pool_pda, mint_a_acc.key)?;
-            vault_a_address = *vault_a_acc.key;
-        }
+        invoke_signed(
+             &system_instruction::create_account(
+                 payer_acc.key,
+                 pool_state_acc.key,
+                 needed_lamports,
+                 pool_state_size as u64,
+                 program_id,
+             ),
+             &[payer_acc.clone(), pool_state_acc.clone(), system_acc.clone()],
+             &[pool_pda_signer_seeds],
+         )?;
 
-        // Vault B
-        if mint_b_is_native {
-            let (sol_vault_b_pda, sol_vault_b_bump) = find_sol_vault_address(&expected_pool_pda, program_id);
-            vault_b_address = sol_vault_b_pda;
-            msg!("Creating SOL Vault B PDA: {}", sol_vault_b_pda);
-            let sol_vault_b_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_b_bump]];
-            invoke_signed(
-                &system_instruction::create_account(
-                    payer_acc.key,
-                    &sol_vault_b_pda,
-                    rent.minimum_balance(0),
-                    0, // space
-                    program_id, // owner
-                ),
-                &[payer_acc.clone(), system_acc.clone(), pool_state_acc.clone()],
-                &[sol_vault_b_signer_seeds],
-            )?;
-        } else {
-            let vault_b_acc = vault_b_maybe.ok_or(ProgramError::NotEnoughAccountKeys)?;
-            validate_spl_pool_vault(vault_b_acc, &expected_pool_pda, mint_b_acc.key)?;
-            vault_b_address = *vault_b_acc.key;
-        }
-
-        // --- Pool State Account Creation & State Initialization ---
-        msg!("Pool Init: Creating Pool State Account...");
-
-        // Calculate PoolState size using temporary serialization
-        let temp_pool_state_data = PoolState {
+        msg!("Pool Init: Writing initial state...");
+        // Serialize the final state into the created account
+        let final_pool_data = PoolState {
             token_mint_a: *mint_a_acc.key,
             token_mint_b: *mint_b_acc.key,
-            vault_a: vault_a_address,
-            vault_b: vault_b_address,
+            vault_a: *vault_a_acc.key,
+            vault_b: *vault_b_acc.key,
             lp_mint: *lp_mint_acc.key,
             total_lp_supply: 0,
             bump,
             plugin_program_id: *plugin_prog_acc.key,
             plugin_state_pubkey: *plugin_state_acc.key,
         };
-        let pool_state_size = borsh::to_vec(&temp_pool_state_data)?.len();
-        let needed_lamports = rent.minimum_balance(pool_state_size);
-
-        invoke_signed(
-            &system_instruction::create_account(
-                payer_acc.key,
-                pool_state_acc.key,
-                needed_lamports,
-                pool_state_size as u64,
-                program_id,
-            ),
-            &[payer_acc.clone(), pool_state_acc.clone(), system_acc.clone()],
-            &[pool_pda_signer_seeds],
-        )?;
-
-        msg!("Pool Init: Writing initial state...");
-        // Now serialize the final state into the created account
-        temp_pool_state_data.serialize(&mut *pool_state_acc.data.borrow_mut())?;
+        final_pool_data.serialize(&mut *pool_state_acc.data.borrow_mut())?;
 
         msg!("Pool: Initialized state written successfully.");
 
@@ -329,23 +353,30 @@ impl Processor {
         }
 
         // --- Account Data Validations ---
-        validate_spl_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
-        validate_spl_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
+        let mint_a_is_native = pool_data.token_mint_a == NATIVE_MINT;
+        let mint_b_is_native = pool_data.token_mint_b == NATIVE_MINT;
+
+        if mint_a_is_native {
+            validate_sol_pool_vault(vault_a_acc, &pool_data.vault_a, program_id)?;
+            validate_user_sol_account(user_token_a_acc, user_acc.key, true, false)?; // Signer=true if transferring FROM user
+        } else {
+            validate_spl_pool_vault(vault_a_acc, &expected_pda, &pool_data.token_mint_a)?;
+            let _ = validate_spl_token_account(user_token_a_acc, user_acc.key, &pool_data.token_mint_a)?;
+        }
+        if mint_b_is_native {
+            validate_sol_pool_vault(vault_b_acc, &pool_data.vault_b, program_id)?;
+            validate_user_sol_account(user_token_b_acc, user_acc.key, true, false)?; // Signer=true if transferring FROM user
+        } else {
+            validate_spl_pool_vault(vault_b_acc, &expected_pda, &pool_data.token_mint_b)?;
+            let _ = validate_spl_token_account(user_token_b_acc, user_acc.key, &pool_data.token_mint_b)?;
+        }
+
         // Validate LP Mint (Properties only, supply can be non-zero)
         let lp_mint_data_option = validate_mint_basic(lp_mint_acc)?;
         let lp_mint_data = lp_mint_data_option.ok_or(PoolError::InvalidMint)?;
         validate_lp_mint_properties(&lp_mint_data, &expected_pda)?;
 
-        let _user_token_a_data = validate_spl_token_account(
-            user_token_a_acc,
-            user_acc.key,
-            &pool_data.token_mint_a,
-        )?;
-        let _user_token_b_data = validate_spl_token_account(
-            user_token_b_acc,
-            user_acc.key,
-            &pool_data.token_mint_b,
-        )?;
+        // Validate user LP account (Always SPL)
         let _user_lp_data = validate_spl_token_account(
             user_lp_acc,
             user_acc.key,
