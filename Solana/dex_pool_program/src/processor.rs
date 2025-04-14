@@ -80,56 +80,56 @@ impl Processor {
     fn process_initialize_pool(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
         msg!("Pool: process_initialize_pool entry");
         let acc_iter = &mut accounts.iter();
-        let payer_acc = next_account_info(acc_iter)?; // 0
-        let pool_state_acc = next_account_info(acc_iter)?; // 1
-        let vault_a_acc = next_account_info(acc_iter)?; // 2 (Always passed)
-        let vault_b_acc = next_account_info(acc_iter)?; // 3 (Always passed)
-        let lp_mint_acc = next_account_info(acc_iter)?; // 4 
-        let mint_a_acc = next_account_info(acc_iter)?; // 5 
-        let mint_b_acc = next_account_info(acc_iter)?; // 6 
-        let plugin_prog_acc = next_account_info(acc_iter)?; // 7 
-        let plugin_state_acc = next_account_info(acc_iter)?; // 8 
-        let system_acc = next_account_info(acc_iter)?; // 9 
-        let rent_acc = next_account_info(acc_iter)?; // 10 
-        let token_prog_acc = next_account_info(acc_iter)?; // 11 
+        let payer_acc = next_account_info(acc_iter)?;
+        let pool_state_acc = next_account_info(acc_iter)?;
+        let vault_a_acc = next_account_info(acc_iter)?;
+        let vault_b_acc = next_account_info(acc_iter)?;
+        let lp_mint_acc = next_account_info(acc_iter)?;
+        let mint_a_acc = next_account_info(acc_iter)?;
+        let mint_b_acc = next_account_info(acc_iter)?;
+        let plugin_prog_acc = next_account_info(acc_iter)?;
+        let plugin_state_acc = next_account_info(acc_iter)?;
+        let system_acc = next_account_info(acc_iter)?;
+        let rent_acc = next_account_info(acc_iter)?;
+        let token_prog_acc = next_account_info(acc_iter)?;
 
         // --- Initial Validations ---
         msg!("Pool Init: Validating accounts...");
-        // 0. Payer must sign
+        // Payer must sign
         if !payer_acc.is_signer {
             msg!("Payer did not sign");
             return Err(PoolError::MissingRequiredSignature.into());
         }
 
-        // 9. System Program ID
+        // System Program ID
         validate_program_id(system_acc, &solana_program::system_program::id())?;
 
-        // 10. Rent Sysvar ID
+        // Rent Sysvar ID
         validate_program_id(rent_acc, &solana_program::sysvar::rent::id())?;
         let rent = Rent::from_account_info(rent_acc)?;
 
-        // 11. Token Program ID
+        // Token Program ID
         validate_program_id(token_prog_acc, &spl_token::id())?;
 
-        // 7. Plugin Program Account (Executable? Owned by Loader?)
+        // Plugin Program Account
         validate_executable(plugin_prog_acc)?;
 
-        // 8. Plugin State Account (Rent-exempt?)
+        // Plugin State Account
         validate_rent_exemption(plugin_state_acc, &rent)?;
 
-        // 5 & 6: Mint A & B must be different
+        // Mints must be different
         if mint_a_acc.key == mint_b_acc.key {
             msg!("Mint A and Mint B cannot be the same");
             return Err(PoolError::MintsMustBeDifferent.into());
         }
 
-        // Validate mints (basic checks + rent)
+        // Validate mints
         let mint_a_is_native = mint_a_acc.key == &NATIVE_MINT;
         let mint_b_is_native = mint_b_acc.key == &NATIVE_MINT;
 
         if mint_a_is_native && mint_b_is_native {
             msg!("Error: Both mints cannot be native SOL");
-            return Err(PoolError::InvalidArgument.into()); // Or a more specific error
+            return Err(PoolError::InvalidArgument.into());
         }
 
         let _mint_a_data = validate_mint_basic(mint_a_acc)?;
@@ -165,8 +165,8 @@ impl Processor {
             return Err(PoolError::IncorrectPoolPDA.into());
         }
 
-        // --- LP Mint & Vault Account Validation ---
-        msg!("Pool Init: Validating Vaults & LP Mint...");
+        // --- LP Mint & Vault Account Validation & Creation ---
+        msg!("Pool Init: Validating/Creating Vaults & LP Mint...");
         // LP Mint (Always SPL)
         let lp_mint_data_option = validate_mint_basic(lp_mint_acc)?;
         let lp_mint_data = lp_mint_data_option.ok_or(PoolError::InvalidMint)?;
@@ -183,7 +183,6 @@ impl Processor {
                     expected_sol_vault_pda, vault_a_acc.key);
                 return Err(PoolError::IncorrectPoolPDA.into());
             }
-            // Now create it using invoke_signed
             msg!("Creating SOL Vault A PDA: {}", expected_sol_vault_pda);
             let sol_vault_a_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_a_bump]];
             invoke_signed(
@@ -194,11 +193,9 @@ impl Processor {
                     0,
                     program_id,
                 ),
-                // Accounts: Payer, New Account (Info passed from client), System Program
                 &[payer_acc.clone(), vault_a_acc.clone(), system_acc.clone()],
                 &[sol_vault_a_signer_seeds],
             )?;
-            // Validate the created account's owner and data (optional, but good practice)
             validate_sol_pool_vault(vault_a_acc, &expected_sol_vault_pda, program_id)?;
         } else {
             validate_spl_pool_vault(vault_a_acc, &expected_pool_pda, mint_a_acc.key)?;
@@ -207,13 +204,11 @@ impl Processor {
         // Vault B Validation & Creation
         if mint_b_is_native {
             let (expected_sol_vault_pda, sol_vault_b_bump) = find_sol_vault_address(&expected_pool_pda, program_id);
-            // Ensure the account passed matches the derived address
              if vault_b_acc.key != &expected_sol_vault_pda {
                 msg!("Invalid SOL Vault B account key provided. Expected {}, got {}",
                     expected_sol_vault_pda, vault_b_acc.key);
                 return Err(PoolError::IncorrectPoolPDA.into());
             }
-            // Now create it using invoke_signed
             msg!("Creating SOL Vault B PDA: {}", expected_sol_vault_pda);
             let sol_vault_b_signer_seeds = &[SOL_VAULT_PREFIX, expected_pool_pda.as_ref(), &[sol_vault_b_bump]];
             invoke_signed(
@@ -224,11 +219,9 @@ impl Processor {
                     0,
                     program_id,
                 ),
-                 // Accounts: Payer, New Account (Info passed from client), System Program
                 &[payer_acc.clone(), vault_b_acc.clone(), system_acc.clone()],
                 &[sol_vault_b_signer_seeds],
             )?;
-             // Validate the created account's owner and data (optional, but good practice)
             validate_sol_pool_vault(vault_b_acc, &expected_sol_vault_pda, program_id)?;
         } else {
             validate_spl_pool_vault(vault_b_acc, &expected_pool_pda, mint_b_acc.key)?;
@@ -238,6 +231,15 @@ impl Processor {
 
         // --- Pool State Account Creation & State Initialization ---
         msg!("Pool Init: Creating Pool State Account...");
+
+        let pool_pda_signer_seeds = &[
+            b"pool",
+            sort_mint_a.as_ref(),
+            sort_mint_b.as_ref(),
+            plugin_prog_acc.key.as_ref(),
+            plugin_state_acc.key.as_ref(),
+            &[bump],
+        ];
 
         // Calculate PoolState size
         let pool_state_size = borsh::to_vec(&PoolState {
@@ -252,15 +254,6 @@ impl Processor {
             plugin_state_pubkey: *plugin_state_acc.key,
         })?.len();
         let needed_lamports = rent.minimum_balance(pool_state_size);
-
-        let pool_pda_signer_seeds = &[
-            b"pool",
-            sort_mint_a.as_ref(),
-            sort_mint_b.as_ref(),
-            plugin_prog_acc.key.as_ref(),
-            plugin_state_acc.key.as_ref(),
-            &[bump],
-        ];
 
         invoke_signed(
              &system_instruction::create_account(
@@ -386,13 +379,13 @@ impl Processor {
 
         // --- Get Reserves (safe after validation) ---
         let reserve_a = if pool_data.token_mint_a == NATIVE_MINT {
-            // Subtract rent reserve? For simplicity, let's assume the full balance is usable for now.
-            // A production system might need `vault_a_acc.lamports().checked_sub(rent.minimum_balance(0)).unwrap_or(0)`
+            // TODO: Consider subtracting rent reserve from usable lamports
             vault_a_acc.lamports()
         } else {
             TokenAccount::unpack(&vault_a_acc.data.borrow())?.amount
         };
         let reserve_b = if pool_data.token_mint_b == NATIVE_MINT {
+            // TODO: Consider subtracting rent reserve from usable lamports
             vault_b_acc.lamports()
         } else {
             TokenAccount::unpack(&vault_b_acc.data.borrow())?.amount

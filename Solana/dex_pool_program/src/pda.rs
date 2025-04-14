@@ -107,7 +107,7 @@ pub fn validate_spl_pool_vault(
     expected_owner_pda: &Pubkey,
     expected_mint: &Pubkey,
 ) -> Result<(), ProgramError> {
-    // --- Check 1: Is the vault account key the correct derived ATA? ---
+    // Check 1: Is the vault account key the correct derived ATA?
     let expected_vault_ata = get_associated_token_address(expected_owner_pda, expected_mint);
     if vault_info.key != &expected_vault_ata {
         msg!(
@@ -118,7 +118,7 @@ pub fn validate_spl_pool_vault(
         return Err(PoolError::IncorrectVaultATA.into());
     }
 
-    // --- Check 2: Ownership by Token Program ---
+    // Check 2: Ownership by Token Program
     if vault_info.owner != &TOKEN_PROGRAM_ID {
         msg!(
             "SPL Vault Error: Account {} owned by {}, expected {}",
@@ -129,7 +129,7 @@ pub fn validate_spl_pool_vault(
         return Err(PoolError::InvalidAccountData.into());
     }
 
-    // --- Check 3: Unpack and Check Initialized State ---
+    // Check 3: Unpack and Check Initialized State
     let token_account_data = TokenAccount::unpack(&vault_info.data.borrow())
         .map_err(|_| PoolError::UnpackAccountFailed)?;
 
@@ -138,7 +138,7 @@ pub fn validate_spl_pool_vault(
         return Err(PoolError::InvalidAccountData.into());
     }
 
-    // --- Check 4: Internal Owner matches Pool PDA ---
+    // Check 4: Internal Owner matches Pool PDA
     if &token_account_data.owner != expected_owner_pda {
         msg!(
             "SPL Vault Error: Account {} owner {} does not match expected PDA {}",
@@ -149,7 +149,7 @@ pub fn validate_spl_pool_vault(
         return Err(PoolError::InvalidVaultOwner.into());
     }
 
-    // --- Check 5: Mint matches expected mint ---
+    // Check 5: Mint matches expected mint
     if &token_account_data.mint != expected_mint {
         msg!(
             "SPL Vault Error: Account {} mint {} does not match expected mint {}",
@@ -191,7 +191,7 @@ pub fn validate_sol_pool_vault(
         return Err(PoolError::InvalidVaultOwner.into());
     }
 
-    // Check Data Length (should be 0 for lamport-holding PDAs)
+    // Check Data Length
     if !vault_info.data_is_empty() {
         msg!(
             "SOL Vault Data Error: Account {} has non-zero data length {}",
@@ -284,19 +284,19 @@ pub fn validate_user_sol_account(
             account_info.owner,
             system_program::id()
         );
-        return Err(PoolError::InvalidAccountData.into()); // Use InvalidAccountData
+        return Err(PoolError::InvalidAccountData.into());
     }
 
-    // Check signer if required (e.g., for transfer FROM)
+    // Check signer if required
     if check_signer && !account_info.is_signer {
         msg!("User SOL Account Error: Account {} must be signer", account_info.key);
         return Err(PoolError::MissingRequiredSignature.into());
     }
 
-    // Check writable if required (e.g., for transfer TO)
+    // Check writable if required
     if check_writable && !account_info.is_writable {
         msg!("User SOL Account Error: Account {} must be writable", account_info.key);
-         return Err(PoolError::InvalidAccountData.into()); // Need a better error? AccountNotWritable?
+         return Err(PoolError::InvalidAccountData.into());
     }
 
     Ok(())
@@ -307,10 +307,10 @@ pub fn validate_user_sol_account(
 /// NO rent check.
 pub fn validate_mint_basic(
     mint_info: &AccountInfo,
-) -> Result<Option<Mint>, ProgramError> { // Return Option<Mint>
+) -> Result<Option<Mint>, ProgramError> {
     // Allow Native SOL Mint
     if mint_info.key == &NATIVE_MINT {
-        return Ok(None); // Indicate it's native mint
+        return Ok(None);
     }
 
     // Check ownership by Token Program for SPL mints
@@ -334,7 +334,7 @@ pub fn validate_mint_basic(
         return Err(PoolError::InvalidAccountData.into());
     }
 
-    Ok(Some(mint_data)) // Indicate it's an SPL mint
+    Ok(Some(mint_data))
 }
 
 /// Validates properties of an LP Mint account's data (authority, freeze authority).
