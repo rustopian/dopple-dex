@@ -215,15 +215,8 @@ impl Processor {
         )?;
         msg!("Pool: invoke_signed successful.");
 
-        // Write the already serialized pool state bytes
-        msg!("Pool: Writing serialized PoolState...");
-        // pool_data.serialize(&mut *pool_state_acc.data.borrow_mut())?; // Old way
         let mut account_data_borrow = pool_state_acc.data.borrow_mut();
         account_data_borrow.copy_from_slice(&pool_data_bytes);
-        // Or alternatively, if you prefer deserializing/reserializing:
-        // let mut pool_data = PoolState::try_from_slice(&account_data_borrow)?;
-        // pool_data = initial_pool_data; // Assign values if needed, though they are the same here
-        // pool_data.serialize(&mut *account_data_borrow)?;
         msg!("Pool: Initialized state written successfully.");
 
         Ok(())
@@ -495,9 +488,7 @@ impl Processor {
         if amount_lp == 0 {
             return Err(PoolError::ZeroAmount.into());
         }
-        // Check against current supply AFTER loading state
         if amount_lp > pool_data.total_lp_supply {
-            // Use specific error? Or reuse InsufficientFunds?
             return Err(PoolError::InsufficientFunds.into());
         }
 
@@ -543,7 +534,6 @@ impl Processor {
         let ix = solana_program::instruction::Instruction {
             program_id: pool_data.plugin_program_id,
             accounts: vec![
-                // Mark as writable (implicit via accounts list), NOT signer (false)
                 solana_program::instruction::AccountMeta::new(*plugin_state_acc.key, false),
             ],
             data: ix_data,
@@ -568,7 +558,7 @@ impl Processor {
             user_lp_acc.key,    // Account to burn from
             &pool_data.lp_mint, // Mint of the token
             user_acc.key,       // Authority (owner of user_lp_acc)
-            &[],                // No multisig signers needed
+            &[],                // (no multisig signers)
             amount_lp,
         )?;
         invoke(
@@ -579,7 +569,6 @@ impl Processor {
                 user_acc.clone(),       // Authority account
                 token_prog_acc.clone(), // Token program
             ],
-            // No signers needed here, user signed the top-level tx
         )?;
 
         // Transfer out token A - Pool PDA must authorize this
@@ -757,7 +746,6 @@ impl Processor {
         let ix = solana_program::instruction::Instruction {
             program_id: pool_data.plugin_program_id,
             accounts: vec![
-                // Mark as writable (implicit), NOT signer
                 solana_program::instruction::AccountMeta::new(*plugin_state_acc.key, false),
             ],
             data: ix_data,
@@ -765,8 +753,8 @@ impl Processor {
         invoke(
             &ix,
             &[
-                plugin_prog_acc.clone(),  // Readonly
-                plugin_state_acc.clone(), // Writable
+                plugin_prog_acc.clone(),
+                plugin_state_acc.clone(),
             ],
         )?;
 

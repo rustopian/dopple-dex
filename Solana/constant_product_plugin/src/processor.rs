@@ -69,7 +69,6 @@ impl Processor {
         }
     }
 
-    // pub for tests
     pub fn compute_add_liquidity(
         accounts: &[AccountInfo],
         reserve_a: u64,
@@ -216,7 +215,7 @@ impl Processor {
             // Use spl-token-swap invariant-preserving logic with ceiling division
             let invariant = U192::from(reserve_in)
                 .checked_mul(U192::from(reserve_out))
-                .ok_or(ProgramError::InvalidInstructionData)?; // Should not overflow
+                .ok_or(ProgramError::InvalidInstructionData)?;
 
             let reserve_in_u128 = reserve_in as u128;
             let reserve_out_u128 = reserve_out as u128;
@@ -266,12 +265,3 @@ fn integer_sqrt(v: u128) -> u128 {
     }
     x
 }
-
-// Additional spl-token-swap Context:
-// - Single-sided deposits/withdrawals often use PreciseNumber math to handle
-//   complex formulas derived from the Balancer whitepaper, allowing for either
-//   Floor or Ceiling rounding based on the operation's needs to maintain fairness
-//   or pool value.
-// - pool_tokens_to_trading_tokens (used in withdraw) explicitly takes a
-//   RoundDirection, showing the choice between floor and ceiling is fundamental.
-//   The processor typically calls it with Floor for standard withdrawals.

@@ -89,12 +89,10 @@ pub fn validate_rent_exemption(
 
 /// Validates a token account intended as a pool vault.
 /// Checks: ATA derivation, Token Program owner, Initialized, Internal Owner (Pool PDA), Mint.
-/// NO rent check.
 pub fn validate_pool_vault(
     vault_info: &AccountInfo,
     expected_owner_pda: &Pubkey,
     expected_mint: &Pubkey,
-    // rent: &Rent, // REMOVED
 ) -> Result<(), ProgramError> {
     // --- Check 1: Is the vault account key the correct derived ATA? ---
     let expected_vault_ata = get_associated_token_address(expected_owner_pda, expected_mint);
@@ -117,9 +115,6 @@ pub fn validate_pool_vault(
         );
         return Err(PoolError::InvalidAccountData.into());
     }
-
-    // Check rent exemption REMOVED
-    // validate_rent_exemption(vault_info, rent)?;
 
     // --- Check 3: Unpack and Check Initialized State ---
     let token_account_data = TokenAccount::unpack(&vault_info.data.borrow())
@@ -157,7 +152,6 @@ pub fn validate_pool_vault(
 
 /// Validates basic properties of any SPL Token account.
 /// Checks: Token Program owner, Initialized, Internal Owner, Mint.
-/// NO rent check.
 pub fn validate_token_account_basic(
     account_info: &AccountInfo,
     expected_owner: &Pubkey,
@@ -214,10 +208,8 @@ pub fn validate_token_account_basic(
 
 /// Validates basic properties of an SPL Mint account.
 /// Checks: Token Program owner, Initialized.
-/// NO rent check.
 pub fn validate_mint_basic(
     mint_info: &AccountInfo,
-    // rent: &Rent, // REMOVED
 ) -> Result<Mint, ProgramError> {
     // Check ownership by Token Program
     if mint_info.owner != &TOKEN_PROGRAM_ID {
@@ -229,9 +221,6 @@ pub fn validate_mint_basic(
         );
         return Err(PoolError::InvalidAccountData.into());
     }
-
-    // Check rent exemption REMOVED
-    // validate_rent_exemption(mint_info, rent)?;
 
     // Unpack Mint data
     let mint_data =

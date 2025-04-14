@@ -1,8 +1,5 @@
 #[cfg(test)]
 mod tests {
-    // Note: Adjust the `use super::*;` or `use crate::...;` lines
-    // depending on where your processor module and types are located.
-    // Assuming they are accessible via `crate::processor::...`
     use crate::processor::{PluginCalcResult, Processor};
     use borsh::BorshDeserialize;
     use solana_program::{
@@ -10,8 +7,8 @@ mod tests {
     };
     use std::mem;
 
-    // Helper to create a basic AccountInfo for testing state accounts
-    // Lifetimes need to be specified for references within AccountInfo
+    /// Helper to create a basic AccountInfo for testing state accounts
+    /// Lifetimes need to be specified for references within AccountInfo
     fn create_state_account_info<'a>(
         key: &'a Pubkey,
         is_writable: bool,
@@ -58,7 +55,7 @@ mod tests {
         let expected_shares = 200u64;
 
         let result = Processor::compute_add_liquidity(
-            &accounts, // Pass the slice
+            &accounts,
             reserve_a,
             reserve_b,
             deposit_a,
