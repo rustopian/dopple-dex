@@ -19,7 +19,7 @@ This gives us our 4 main actions right away:
 - Swap
 - Withdraw
 
-To ward off any unnecessary details, we'll ignore these:
+To ward off complexity and confusion, we'll ignore things like these:
 - Governance or authority over pool creation. Anyone can create pools, but only one pool can exist for any given asset pair with any given logic plugin.
 - Locked liquidity, staked liquidity, etc. All liquidity is subject to withdrawal at any time.
 - Single-token withdrawal. When LP tokens are burned, they give the user tokens from both sides, in equal measure according to the current balance between pools.
