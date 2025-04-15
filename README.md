@@ -29,4 +29,4 @@ To ward off complexity and confusion, we'll ignore things like these:
 
 Not audited. Not for production. 
 
-Note that in the Solana version, `constant_product_plugin` can be called externally. This is probably okay, since the plugin doesn't actually control any balances; it only replies to requests for mathematical operations.
+Note that in the Solana version, `constant_product_plugin` can be called externally and has zero validation. This is probably okay, since the plugin doesn't actually control any balances; it only replies to requests for mathematical operations.
