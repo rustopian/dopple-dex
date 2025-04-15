@@ -27,4 +27,6 @@ To ward off any unnecessary details, we'll ignore these:
 
 ## Security Matters
 
-Right now, `constant_product_plugin` can be called externally. This is probably okay, since the plugin doesn't actually control any balances; it only replies to requests for mathematical operations.
+Not audited. Not for production. 
+
+Note that in the Solana version, `constant_product_plugin` can be called externally. This is probably okay, since the plugin doesn't actually control any balances; it only replies to requests for mathematical operations.
