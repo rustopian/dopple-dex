@@ -22,7 +22,7 @@ This gives us our 4 main actions right away:
 To ward off complexity and confusion, we'll ignore things like these:
 - Governance or authority over pool creation. Anyone can create pools, but only one pool can exist for any given asset pair with any given logic plugin.
 - Locked liquidity, staked liquidity, etc. All liquidity is subject to withdrawal at any time.
-- Single-token withdrawal. When LP tokens are burned, they give the user tokens from both sides, in equal measure according to the current balance between pools.
+- Single-token deposit or withdrawal. Depositing too much of one side refunds users the extra tokens. When LP tokens are burned, they give the user tokens from both sides, in equal measure according to the current balance between pools.
 - For CosmWasm, we'll ignore CW20 tokens - most assets of value are Token Factory or IBC assets, which act like native assets. Our Solana DEX, however, will definitely need to support SPL tokens in addition to SOL. We'll still demonstrate plenty of multi-contract interaction on the CosmWasm side, since LP tokens will be their own CW20 contracts.
 
 ## Security Matters
